@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-const _VolumeTypeName = "partitiondisktmpfsdirectorysymlinkoverlayexternal"
+const _VolumeTypeName = "partitiondisktmpfsmemorydirectorysymlinkoverlayexternal"
 
-var _VolumeTypeIndex = [...]uint8{0, 9, 13, 18, 27, 34, 41, 49}
+var _VolumeTypeIndex = [...]uint8{0, 9, 13, 18, 24, 33, 40, 47, 55}
 
-const _VolumeTypeLowerName = "partitiondisktmpfsdirectorysymlinkoverlayexternal"
+const _VolumeTypeLowerName = "partitiondisktmpfsmemorydirectorysymlinkoverlayexternal"
 
 func (i VolumeType) String() string {
 	if i < 0 || i >= VolumeType(len(_VolumeTypeIndex)-1) {
@@ -27,13 +27,14 @@ func _VolumeTypeNoOp() {
 	_ = x[VolumeTypePartition-(0)]
 	_ = x[VolumeTypeDisk-(1)]
 	_ = x[VolumeTypeTmpfs-(2)]
-	_ = x[VolumeTypeDirectory-(3)]
-	_ = x[VolumeTypeSymlink-(4)]
-	_ = x[VolumeTypeOverlay-(5)]
-	_ = x[VolumeTypeExternal-(6)]
+	_ = x[VolumeTypeMemory-(3)]
+	_ = x[VolumeTypeDirectory-(4)]
+	_ = x[VolumeTypeSymlink-(5)]
+	_ = x[VolumeTypeOverlay-(6)]
+	_ = x[VolumeTypeExternal-(7)]
 }
 
-var _VolumeTypeValues = []VolumeType{VolumeTypePartition, VolumeTypeDisk, VolumeTypeTmpfs, VolumeTypeDirectory, VolumeTypeSymlink, VolumeTypeOverlay, VolumeTypeExternal}
+var _VolumeTypeValues = []VolumeType{VolumeTypePartition, VolumeTypeDisk, VolumeTypeTmpfs, VolumeTypeMemory, VolumeTypeDirectory, VolumeTypeSymlink, VolumeTypeOverlay, VolumeTypeExternal}
 
 var _VolumeTypeNameToValueMap = map[string]VolumeType{
 	_VolumeTypeName[0:9]:        VolumeTypePartition,
@@ -42,24 +43,27 @@ var _VolumeTypeNameToValueMap = map[string]VolumeType{
 	_VolumeTypeLowerName[9:13]:  VolumeTypeDisk,
 	_VolumeTypeName[13:18]:      VolumeTypeTmpfs,
 	_VolumeTypeLowerName[13:18]: VolumeTypeTmpfs,
-	_VolumeTypeName[18:27]:      VolumeTypeDirectory,
-	_VolumeTypeLowerName[18:27]: VolumeTypeDirectory,
-	_VolumeTypeName[27:34]:      VolumeTypeSymlink,
-	_VolumeTypeLowerName[27:34]: VolumeTypeSymlink,
-	_VolumeTypeName[34:41]:      VolumeTypeOverlay,
-	_VolumeTypeLowerName[34:41]: VolumeTypeOverlay,
-	_VolumeTypeName[41:49]:      VolumeTypeExternal,
-	_VolumeTypeLowerName[41:49]: VolumeTypeExternal,
+	_VolumeTypeName[18:24]:      VolumeTypeMemory,
+	_VolumeTypeLowerName[18:24]: VolumeTypeMemory,
+	_VolumeTypeName[24:33]:      VolumeTypeDirectory,
+	_VolumeTypeLowerName[24:33]: VolumeTypeDirectory,
+	_VolumeTypeName[33:40]:      VolumeTypeSymlink,
+	_VolumeTypeLowerName[33:40]: VolumeTypeSymlink,
+	_VolumeTypeName[40:47]:      VolumeTypeOverlay,
+	_VolumeTypeLowerName[40:47]: VolumeTypeOverlay,
+	_VolumeTypeName[47:55]:      VolumeTypeExternal,
+	_VolumeTypeLowerName[47:55]: VolumeTypeExternal,
 }
 
 var _VolumeTypeNames = []string{
 	_VolumeTypeName[0:9],
 	_VolumeTypeName[9:13],
 	_VolumeTypeName[13:18],
-	_VolumeTypeName[18:27],
-	_VolumeTypeName[27:34],
-	_VolumeTypeName[34:41],
-	_VolumeTypeName[41:49],
+	_VolumeTypeName[18:24],
+	_VolumeTypeName[24:33],
+	_VolumeTypeName[33:40],
+	_VolumeTypeName[40:47],
+	_VolumeTypeName[47:55],
 }
 
 // VolumeTypeString retrieves an enum value from the enum constants string name.

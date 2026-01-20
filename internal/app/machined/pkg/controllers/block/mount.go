@@ -306,6 +306,9 @@ func (ctrl *MountController) handleMountOperation(
 	case block.VolumeTypeTmpfs:
 		return fmt.Errorf("not implemented yet")
 
+	case block.VolumeTypeMemory:
+		return ctrl.handleMemoryMountOperation(logger, rootPath, mountTarget, mountRequest, volumeStatus)
+
 	case block.VolumeTypeExternal:
 		return ctrl.handleDiskMountOperation(logger, mountSource, filepath.Join(rootPath, mountTarget), mountFilesystem, mountRequest, volumeStatus)
 
@@ -510,6 +513,51 @@ func (ctrl *MountController) handleSymlinkMountOperation(
 	ctrl.activeMounts[mountRequest.Metadata().ID()] = &mountContext{}
 
 	return nil
+}
+
+func (ctrl *MountController) handleMemoryMountOperation(
+	logger *zap.Logger,
+	rootPath string,
+	target string,
+	mountRequest *block.MountRequest,
+	volumeStatus *block.VolumeStatus,
+) error {
+	_, ok := ctrl.activeMounts[mountRequest.Metadata().ID()]
+	if ok {
+		return nil
+	}
+
+	targetPath := filepath.Join(rootPath, target)
+
+	// Create the target directory if it doesn't exist
+	if err := os.Mkdir(targetPath, volumeStatus.TypedSpec().MountSpec.FileMode); err != nil {
+		if !os.IsExist(err) {
+			return fmt.Errorf("failed to create target path: %w", err)
+		}
+
+		st, err := os.Stat(targetPath)
+		if err != nil {
+			return fmt.Errorf("failed to stat target path: %w", err)
+		}
+
+		if !st.IsDir() {
+			return fmt.Errorf("target path %q is not a directory", targetPath)
+		}
+	}
+
+	// Mount tmpfs
+	if err := unix.Mount("tmpfs", targetPath, "tmpfs", 0, ""); err != nil {
+		return fmt.Errorf("failed to mount tmpfs: %w", err)
+	}
+
+	ctrl.activeMounts[mountRequest.Metadata().ID()] = &mountContext{
+		point: mount.NewPoint("tmpfs", 0, targetPath, 0, "tmpfs"),
+		unmounter: func() error {
+			return unix.Unmount(targetPath, 0)
+		},
+	}
+
+	return ctrl.updateTargetSettings(targetPath, volumeStatus.TypedSpec().MountSpec)
 }
 
 //nolint:gocyclo
@@ -778,6 +826,9 @@ func (ctrl *MountController) handleUnmountOperation(
 	case block.VolumeTypeTmpfs:
 		return fmt.Errorf("not implemented yet")
 
+	case block.VolumeTypeMemory:
+		return ctrl.handleMemoryUnmountOperation(logger, mountRequest, volumeStatus)
+
 	case block.VolumeTypeExternal:
 		return ctrl.handleDiskUnmountOperation(logger, mountRequest, volumeStatus)
 
@@ -841,6 +892,31 @@ func (ctrl *MountController) handleDirectoryUnmountOperation(
 	logger.Info("volume unmount",
 		zap.String("volume", mountRequest.Metadata().ID()),
 		zap.String("source", mountCtx.point.Source()),
+		zap.String("target", mountCtx.point.Target()),
+	)
+
+	return nil
+}
+
+func (ctrl *MountController) handleMemoryUnmountOperation(
+	logger *zap.Logger,
+	mountRequest *block.MountRequest,
+	_ *block.VolumeStatus,
+) error {
+	mountCtx, ok := ctrl.activeMounts[mountRequest.Metadata().ID()]
+	if !ok {
+		return nil
+	}
+
+	// Unmount the tmpfs using the unmounter callback
+	if err := mountCtx.unmounter(); err != nil {
+		return fmt.Errorf("failed to unmount memory volume: %w", err)
+	}
+
+	delete(ctrl.activeMounts, mountRequest.Metadata().ID())
+
+	logger.Info("memory volume unmount",
+		zap.String("volume", mountRequest.Metadata().ID()),
 		zap.String("target", mountCtx.point.Target()),
 	)
 

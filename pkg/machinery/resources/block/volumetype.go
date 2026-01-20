@@ -14,6 +14,7 @@ const (
 	VolumeTypePartition VolumeType = iota // partition
 	VolumeTypeDisk                        // disk
 	VolumeTypeTmpfs                       // tmpfs
+	VolumeTypeMemory                      // memory
 	VolumeTypeDirectory                   // directory
 	VolumeTypeSymlink                     // symlink
 	VolumeTypeOverlay                     // overlay

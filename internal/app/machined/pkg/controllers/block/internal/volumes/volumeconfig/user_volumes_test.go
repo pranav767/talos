@@ -121,7 +121,42 @@ func TestUserVolumeTransformer(t *testing.T) {
 			},
 		},
 		{
-			name: "unsupported volume type",
+			name: "memory volume",
+			cfg: []*blockcfg.UserVolumeConfigV1Alpha1{{
+				Meta: meta.Meta{
+					MetaKind:       blockcfg.UserVolumeConfigKind,
+					MetaAPIVersion: "v1alpha1",
+				},
+				MetaName:   "mem1",
+				VolumeType: pointer.To(block.VolumeTypeMemory),
+			}},
+			checkFunc: func(t *testing.T, resources []volumeconfig.VolumeResource, err error) {
+				require.NoError(t, err)
+				require.Len(t, resources, 1)
+
+				assert.Equal(t, constants.UserVolumePrefix+"mem1", resources[0].VolumeID)
+				assert.Equal(t, block.UserVolumeLabel, resources[0].Label)
+
+				testTransformFunc(t, resources[0].TransformFunc, func(t *testing.T, vc *block.VolumeConfig, err error) {
+					require.NoError(t, err)
+
+					assert.Equal(t, block.VolumeTypeMemory, vc.TypedSpec().Type)
+
+					require.Empty(t, vc.TypedSpec().Provisioning)
+
+					assert.Equal(t, "mem1", vc.TypedSpec().Mount.TargetPath)
+					assert.Equal(t, constants.UserVolumeMountPoint, vc.TypedSpec().Mount.ParentID)
+					assert.Equal(t, fs.FileMode(0o755), vc.TypedSpec().Mount.FileMode)
+				})
+
+				testMountTransformFunc(t, resources[0].MountTransformFunc, func(t *testing.T, m *block.VolumeMountRequest, err error) {
+					// default mount transform is noop
+					require.NoError(t, err)
+				})
+			},
+		},
+		{
+			name: "unsupported volume type tmpfs",
 			cfg: []*blockcfg.UserVolumeConfigV1Alpha1{{
 				Meta: meta.Meta{
 					MetaKind:       blockcfg.UserVolumeConfigKind,

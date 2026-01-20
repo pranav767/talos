@@ -125,6 +125,19 @@ func UserVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 				WithConvertEncryptionConfiguration(userVolumeConfig.Encryption()).
 				WriterFunc()
 
+		case block.VolumeTypeMemory:
+			userVolumeResource.TransformFunc = NewBuilder().
+				WithType(block.VolumeTypeMemory).
+				WithMount(block.MountSpec{
+					TargetPath:   userVolumeConfig.Name(),
+					ParentID:     constants.UserVolumeMountPoint,
+					SelinuxLabel: constants.EphemeralSelinuxLabel,
+					FileMode:     0o755,
+					UID:          0,
+					GID:          0,
+				}).
+				WriterFunc()
+
 		case block.VolumeTypeTmpfs, block.VolumeTypeSymlink, block.VolumeTypeOverlay, block.VolumeTypeExternal:
 			fallthrough
 

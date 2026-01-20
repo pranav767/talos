@@ -413,7 +413,7 @@ func (ctrl *VolumeManagerController) Run(ctx context.Context, r controller.Runti
 						block.VolumeTypeDirectory,
 						block.VolumeTypeOverlay,
 						block.VolumeTypeSymlink,
-						block.VolumeTypeMemory,
+						block.VolumeTypeTmpfs,
 					},
 					volumeStatus.TypedSpec().Type,
 				)

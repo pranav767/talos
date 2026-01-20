@@ -304,10 +304,7 @@ func (ctrl *MountController) handleMountOperation(
 		return ctrl.handleSymlinkMountOperation(logger, rootPath, mountTarget, mountRequest, volumeStatus)
 
 	case block.VolumeTypeTmpfs:
-		return fmt.Errorf("not implemented yet")
-
-	case block.VolumeTypeMemory:
-		return ctrl.handleMemoryMountOperation(logger, rootPath, mountTarget, mountRequest, volumeStatus)
+		return ctrl.handleTmpfsMountOperation(logger, rootPath, mountTarget, mountRequest, volumeStatus)
 
 	case block.VolumeTypeExternal:
 		return ctrl.handleDiskMountOperation(logger, mountSource, filepath.Join(rootPath, mountTarget), mountFilesystem, mountRequest, volumeStatus)
@@ -515,7 +512,7 @@ func (ctrl *MountController) handleSymlinkMountOperation(
 	return nil
 }
 
-func (ctrl *MountController) handleMemoryMountOperation(
+func (ctrl *MountController) handleTmpfsMountOperation(
 	logger *zap.Logger,
 	rootPath string,
 	target string,
@@ -824,10 +821,7 @@ func (ctrl *MountController) handleUnmountOperation(
 		return ctrl.handleDirectoryUnmountOperation(logger, mountRequest, volumeStatus)
 
 	case block.VolumeTypeTmpfs:
-		return fmt.Errorf("not implemented yet")
-
-	case block.VolumeTypeMemory:
-		return ctrl.handleMemoryUnmountOperation(logger, mountRequest, volumeStatus)
+		return ctrl.handleTmpfsUnmountOperation(logger, mountRequest, volumeStatus)
 
 	case block.VolumeTypeExternal:
 		return ctrl.handleDiskUnmountOperation(logger, mountRequest, volumeStatus)
@@ -898,7 +892,7 @@ func (ctrl *MountController) handleDirectoryUnmountOperation(
 	return nil
 }
 
-func (ctrl *MountController) handleMemoryUnmountOperation(
+func (ctrl *MountController) handleTmpfsUnmountOperation(
 	logger *zap.Logger,
 	mountRequest *block.MountRequest,
 	_ *block.VolumeStatus,
@@ -910,12 +904,12 @@ func (ctrl *MountController) handleMemoryUnmountOperation(
 
 	// Unmount the tmpfs using the unmounter callback
 	if err := mountCtx.unmounter(); err != nil {
-		return fmt.Errorf("failed to unmount memory volume: %w", err)
+		return fmt.Errorf("failed to unmount tmpfs volume: %w", err)
 	}
 
 	delete(ctrl.activeMounts, mountRequest.Metadata().ID())
 
-	logger.Info("memory volume unmount",
+	logger.Info("tmpfs volume unmount",
 		zap.String("volume", mountRequest.Metadata().ID()),
 		zap.String("target", mountCtx.point.Target()),
 	)

@@ -14,6 +14,7 @@ import (
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/block/internal/volumes"
 	"github.com/siderolabs/talos/internal/pkg/partition"
 	configconfig "github.com/siderolabs/talos/pkg/machinery/config/config"
+	blockcfg "github.com/siderolabs/talos/pkg/machinery/config/types/block"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"github.com/siderolabs/talos/pkg/machinery/imager/quirks"
 	"github.com/siderolabs/talos/pkg/machinery/resources/block"
@@ -105,6 +106,26 @@ func GetEphemeralVolumeTransformer(inContainer bool) volumeConfigTransformer {
 			volumeConfigurator = func(vc *block.VolumeConfig) error {
 				extraVolumeConfig, _ := cfg.Volumes().ByName(constants.EphemeralPartitionLabel)
 
+				// Check if the user has configured EPHEMERAL as tmpfs
+				// Need to type assert to access Type() method
+				if typed, ok := extraVolumeConfig.(*blockcfg.VolumeConfigV1Alpha1); ok {
+					volumeType := typed.Type()
+					if volumeType.ValueOr(block.VolumeTypePartition) == block.VolumeTypeTmpfs {
+						// Configure as tmpfs volume
+						return NewBuilder().
+							WithType(block.VolumeTypeTmpfs).
+							WithMount(block.MountSpec{
+								TargetPath:   constants.EphemeralMountPoint,
+								SelinuxLabel: constants.EphemeralSelinuxLabel,
+								FileMode:     0o755,
+								UID:          0,
+								GID:          0,
+							}).
+							Apply(vc.TypedSpec())
+					}
+				}
+
+				// Default to partition-based EPHEMERAL
 				return NewBuilder().
 					WithType(block.VolumeTypePartition).
 					WithProvisioning(block.ProvisioningSpec{

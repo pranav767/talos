@@ -64,6 +64,14 @@ type VolumeConfigV1Alpha1 struct {
 	//     Name of the volume.
 	MetaName string `yaml:"name"`
 	//   description: |
+	//     Volume type.
+	//   values:
+	//     - partition
+	//     - tmpfs
+	//  schema:
+	//    type: string
+	VolumeType *VolumeType `yaml:"volumeType,omitempty"`
+	//   description: |
 	//     The provisioning describes how the volume is provisioned.
 	ProvisioningSpec ProvisioningSpec `yaml:"provisioning,omitempty"`
 	//   description: |
@@ -206,6 +214,15 @@ func (s *VolumeConfigV1Alpha1) Validate(validation.RuntimeMode, ...validation.Op
 // Provisioning implements config.VolumeConfig interface.
 func (s *VolumeConfigV1Alpha1) Provisioning() config.VolumeProvisioningConfig {
 	return s.ProvisioningSpec
+}
+
+// Type returns the volume type.
+func (s *VolumeConfigV1Alpha1) Type() optional.Optional[block.VolumeType] {
+	if s.VolumeType == nil {
+		return optional.None[block.VolumeType]()
+	}
+
+	return optional.Some(block.VolumeType(*s.VolumeType))
 }
 
 // Encryption implements config.VolumeConfig interface.

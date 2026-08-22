@@ -10,14 +10,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cosi-project/runtime/pkg/state"
-	"github.com/cosi-project/runtime/pkg/state/impl/inmem"
 	"github.com/siderolabs/crypto/x509"
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/siderolabs/talos/pkg/machinery/compatibility"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/meta"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 	"github.com/siderolabs/talos/pkg/machinery/config/validation"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
@@ -102,6 +100,29 @@ func TestValidate(t *testing.T) {
 			},
 			expectedWarnings: []string{
 				`use "worker" instead of "join" for machine type`,
+			},
+		},
+		{
+			name: "MachineFilesDeprecated",
+			config: &v1alpha1.Config{
+				ConfigVersion: "v1alpha1",
+				MachineConfig: &v1alpha1.MachineConfig{
+					MachineType: "worker",
+					MachineCA: &x509.PEMEncodedCertificateAndKey{
+						Crt: []byte("foo"),
+					},
+					MachineFiles: []*v1alpha1.MachineFile{ //nolint:staticcheck // test deprecation warning
+						{FilePath: "/var/example", FileOp: "create"},
+					},
+				},
+				ClusterConfig: &v1alpha1.ClusterConfig{
+					ControlPlane: &v1alpha1.ControlPlaneConfig{
+						Endpoint: &v1alpha1.Endpoint{endpointURL},
+					},
+				},
+			},
+			expectedWarnings: []string{
+				`.machine.files is deprecated; use dedicated configuration documents instead`,
 			},
 		},
 		{
@@ -206,7 +227,9 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			name: "NoMachineInstallRequired",
+			// .machine.install is deprecated in favor of the UnattendedInstallConfig document and is no longer
+			// required, even in install mode.
+			name: "NoMachineInstallNotRequired",
 			config: &v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
@@ -224,7 +247,6 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			requiresInstall: true,
-			expectedError:   "1 error occurred:\n\t* install instructions are required in \"runtimeMode(true)\" mode\n\n",
 		},
 		{
 			name: "MachineInstallDisk",
@@ -277,7 +299,7 @@ func TestValidate(t *testing.T) {
 			},
 			requiresInstall: true,
 			expectedWarnings: []string{
-				".machine.install.extensions is deprecated, please see https://www.talos.dev/latest/talos-guides/install/boot-assets/",
+				".machine.install.extensions is deprecated, please see https://docs.siderolabs.com/talos/latest/platform-specific-installations/boot-assets",
 			},
 		},
 		{
@@ -292,7 +314,7 @@ func TestValidate(t *testing.T) {
 					MachineInstall: &v1alpha1.InstallConfig{
 						InstallDisk:              "/dev/vda",
 						InstallExtraKernelArgs:   []string{"foo=bar"},
-						InstallGrubUseUKICmdline: pointer.To(true),
+						InstallGrubUseUKICmdline: new(true),
 					},
 				},
 				ClusterConfig: &v1alpha1.ClusterConfig{
@@ -323,7 +345,7 @@ func TestValidate(t *testing.T) {
 						},
 					},
 					ExternalCloudProviderConfig: &v1alpha1.ExternalCloudProviderConfig{
-						ExternalEnabled: pointer.To(true),
+						ExternalEnabled: new(true),
 						ExternalManifests: []string{
 							"https://www.example.com/manifest1.yaml",
 							"https://www.example.com/manifest2.yaml",
@@ -349,7 +371,7 @@ func TestValidate(t *testing.T) {
 						},
 					},
 					ExternalCloudProviderConfig: &v1alpha1.ExternalCloudProviderConfig{
-						ExternalEnabled: pointer.To(true),
+						ExternalEnabled: new(true),
 					},
 				},
 			},
@@ -417,7 +439,7 @@ func TestValidate(t *testing.T) {
 						},
 					},
 					ExternalCloudProviderConfig: &v1alpha1.ExternalCloudProviderConfig{
-						ExternalEnabled: pointer.To(true),
+						ExternalEnabled: new(true),
 						ExternalManifests: []string{
 							"/manifest.yaml",
 						},
@@ -859,7 +881,7 @@ func TestValidate(t *testing.T) {
 							},
 							{
 								DeviceInterface: "eth0",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 							},
 							{
 								DeviceInterface: "eth1",
@@ -915,7 +937,7 @@ func TestValidate(t *testing.T) {
 							},
 							{
 								DeviceInterface: "eth0",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 							},
 							{
 								DeviceInterface: "eth1",
@@ -1187,34 +1209,6 @@ func TestValidate(t *testing.T) {
 				"\t* [networking.os.device.route[7]]: either network or gateway should be set\n\n",
 		},
 		{
-			name: "KubeSpanNoDiscovery",
-			config: &v1alpha1.Config{
-				ConfigVersion: "v1alpha1",
-				MachineConfig: &v1alpha1.MachineConfig{
-					MachineType: "controlplane",
-					MachineCA: &x509.PEMEncodedCertificateAndKey{
-						Crt: []byte("foo"),
-						Key: []byte("bar"),
-					},
-					MachineNetwork: &v1alpha1.NetworkConfig{
-						NetworkKubeSpan: &v1alpha1.NetworkKubeSpan{
-							KubeSpanEnabled: pointer.To(true),
-						},
-					},
-				},
-				ClusterConfig: &v1alpha1.ClusterConfig{
-					ControlPlane: &v1alpha1.ControlPlaneConfig{
-						Endpoint: &v1alpha1.Endpoint{
-							endpointURL,
-						},
-					},
-				},
-			},
-			expectedError: "3 errors occurred:\n\t* .cluster.discovery should be enabled when .machine.network.kubespan is enabled\n" +
-				"\t* .cluster.id should be set when .machine.network.kubespan is enabled\n" +
-				"\t* .cluster.secret should be set when .machine.network.kubespan is enabled\n\n",
-		},
-		{
 			name: "DiscoveryServiceEndpoint",
 			config: &v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
@@ -1234,7 +1228,7 @@ func TestValidate(t *testing.T) {
 						},
 					},
 					ClusterDiscoveryConfig: &v1alpha1.ClusterDiscoveryConfig{
-						DiscoveryEnabled: pointer.To(true),
+						DiscoveryEnabled: new(true),
 						DiscoveryRegistries: v1alpha1.DiscoveryRegistriesConfig{
 							RegistryService: v1alpha1.RegistryServiceConfig{
 								RegistryEndpoint: "foo",
@@ -1263,7 +1257,7 @@ func TestValidate(t *testing.T) {
 						},
 					},
 					ClusterDiscoveryConfig: &v1alpha1.ClusterDiscoveryConfig{
-						DiscoveryEnabled: pointer.To(true),
+						DiscoveryEnabled: new(true),
 					},
 				},
 			},
@@ -1446,7 +1440,7 @@ func TestValidate(t *testing.T) {
 						},
 					},
 					MachineKubelet: &v1alpha1.KubeletConfig{
-						KubeletExtraConfig: v1alpha1.Unstructured{
+						KubeletExtraConfig: meta.Unstructured{
 							Object: map[string]any{
 								"port": 345,
 							},
@@ -1558,9 +1552,9 @@ func TestValidate(t *testing.T) {
 						Crt: []byte("foo"),
 					},
 					MachineFeatures: &v1alpha1.FeaturesConfig{
-						RBAC: pointer.To(true),
+						RBAC: new(true),
 						KubernetesTalosAPIAccessConfig: &v1alpha1.KubernetesTalosAPIAccessConfig{
-							AccessEnabled: pointer.To(true),
+							AccessEnabled: new(true),
 						},
 					},
 				},
@@ -1585,9 +1579,9 @@ func TestValidate(t *testing.T) {
 						Key: []byte("bar"),
 					},
 					MachineFeatures: &v1alpha1.FeaturesConfig{
-						RBAC: pointer.To(true),
+						RBAC: new(true),
 						KubernetesTalosAPIAccessConfig: &v1alpha1.KubernetesTalosAPIAccessConfig{
-							AccessEnabled: pointer.To(true),
+							AccessEnabled: new(true),
 							AccessAllowedRoles: []string{
 								"os:reader",
 								"invalid:role1",
@@ -1648,7 +1642,7 @@ func TestValidate(t *testing.T) {
 					},
 					MachineNetwork: &v1alpha1.NetworkConfig{
 						NetworkKubeSpan: &v1alpha1.NetworkKubeSpan{
-							KubeSpanEnabled: pointer.To(true),
+							KubeSpanEnabled: new(true),
 							KubeSpanFilters: &v1alpha1.KubeSpanFilters{
 								KubeSpanFiltersEndpoints: []string{
 									"0.0.0.0/0",
@@ -1668,7 +1662,7 @@ func TestValidate(t *testing.T) {
 					ClusterID:     "test",
 					ClusterSecret: "test",
 					ClusterDiscoveryConfig: &v1alpha1.ClusterDiscoveryConfig{
-						DiscoveryEnabled: pointer.To(true),
+						DiscoveryEnabled: new(true),
 					},
 				},
 			},
@@ -1685,7 +1679,7 @@ func TestValidate(t *testing.T) {
 					},
 					MachineNetwork: &v1alpha1.NetworkConfig{
 						NetworkKubeSpan: &v1alpha1.NetworkKubeSpan{
-							KubeSpanEnabled: pointer.To(true),
+							KubeSpanEnabled: new(true),
 							KubeSpanFilters: &v1alpha1.KubeSpanFilters{
 								KubeSpanFiltersEndpoints: []string{
 									"!10",
@@ -1704,14 +1698,14 @@ func TestValidate(t *testing.T) {
 					ClusterID:     "test",
 					ClusterSecret: "test",
 					ClusterDiscoveryConfig: &v1alpha1.ClusterDiscoveryConfig{
-						DiscoveryEnabled: pointer.To(true),
+						DiscoveryEnabled: new(true),
 					},
 				},
 			},
-			expectedError: "2 errors occurred:\n\t* KubeSpan endpoint filer is not valid: \"10\"\n\t* KubeSpan endpoint filer is not valid: \"123::/456\"\n\n",
+			expectedError: "2 errors occurred:\n\t* KubeSpan endpoint filter is not valid: \"10\"\n\t* KubeSpan endpoint filter is not valid: \"123::/456\"\n\n",
 		},
 		{
-			name: "KubeSpanSmallMTU",
+			name: "GoodKubeSpanAdvertisedNetworkFilters",
 			config: &v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
@@ -1721,8 +1715,15 @@ func TestValidate(t *testing.T) {
 					},
 					MachineNetwork: &v1alpha1.NetworkConfig{
 						NetworkKubeSpan: &v1alpha1.NetworkKubeSpan{
-							KubeSpanEnabled: pointer.To(true),
-							KubeSpanMTU:     pointer.To(uint32(576)),
+							KubeSpanEnabled: new(true),
+							KubeSpanFilters: &v1alpha1.KubeSpanFilters{
+								KubeSpanFiltersExcludeAdvertisedNetworks: []string{
+									"0.0.0.0/0",
+									"10.0.0.0/8",
+									"172.16.0.0/12",
+									"::/0",
+								},
+							},
 						},
 					},
 				},
@@ -1735,7 +1736,74 @@ func TestValidate(t *testing.T) {
 					ClusterID:     "test",
 					ClusterSecret: "test",
 					ClusterDiscoveryConfig: &v1alpha1.ClusterDiscoveryConfig{
-						DiscoveryEnabled: pointer.To(true),
+						DiscoveryEnabled: new(true),
+					},
+				},
+			},
+			expectedError: "",
+		},
+		{
+			name: "BadKubeSpanAdvertisedNetworkFilters",
+			config: &v1alpha1.Config{
+				ConfigVersion: "v1alpha1",
+				MachineConfig: &v1alpha1.MachineConfig{
+					MachineType: "worker",
+					MachineCA: &x509.PEMEncodedCertificateAndKey{
+						Crt: []byte("foo"),
+					},
+					MachineNetwork: &v1alpha1.NetworkConfig{
+						NetworkKubeSpan: &v1alpha1.NetworkKubeSpan{
+							KubeSpanEnabled: new(true),
+							KubeSpanFilters: &v1alpha1.KubeSpanFilters{
+								KubeSpanFiltersExcludeAdvertisedNetworks: []string{
+									"invalid",
+									"123::/456",
+								},
+							},
+						},
+					},
+				},
+				ClusterConfig: &v1alpha1.ClusterConfig{
+					ControlPlane: &v1alpha1.ControlPlaneConfig{
+						Endpoint: &v1alpha1.Endpoint{
+							endpointURL,
+						},
+					},
+					ClusterID:     "test",
+					ClusterSecret: "test",
+					ClusterDiscoveryConfig: &v1alpha1.ClusterDiscoveryConfig{
+						DiscoveryEnabled: new(true),
+					},
+				},
+			},
+			expectedError: "2 errors occurred:\n\t* KubeSpan exclude advertised networks filter is not valid: \"invalid\"\n\t* KubeSpan exclude advertised networks filter is not valid: \"123::/456\"\n\n",
+		},
+		{
+			name: "KubeSpanSmallMTU",
+			config: &v1alpha1.Config{
+				ConfigVersion: "v1alpha1",
+				MachineConfig: &v1alpha1.MachineConfig{
+					MachineType: "worker",
+					MachineCA: &x509.PEMEncodedCertificateAndKey{
+						Crt: []byte("foo"),
+					},
+					MachineNetwork: &v1alpha1.NetworkConfig{
+						NetworkKubeSpan: &v1alpha1.NetworkKubeSpan{
+							KubeSpanEnabled: new(true),
+							KubeSpanMTU:     new(uint32(576)),
+						},
+					},
+				},
+				ClusterConfig: &v1alpha1.ClusterConfig{
+					ControlPlane: &v1alpha1.ControlPlaneConfig{
+						Endpoint: &v1alpha1.Endpoint{
+							endpointURL,
+						},
+					},
+					ClusterID:     "test",
+					ClusterSecret: "test",
+					ClusterDiscoveryConfig: &v1alpha1.ClusterDiscoveryConfig{
+						DiscoveryEnabled: new(true),
 					},
 				},
 			},
@@ -1760,7 +1828,7 @@ func TestValidate(t *testing.T) {
 					},
 					APIServerConfig: &v1alpha1.APIServerConfig{
 						ResourcesConfig: &v1alpha1.ResourcesConfig{
-							Requests: v1alpha1.Unstructured{
+							Requests: meta.Unstructured{
 								Object: map[string]any{
 									"cpu":      "1m",
 									"invalid1": "23",
@@ -1770,7 +1838,7 @@ func TestValidate(t *testing.T) {
 					},
 					ControllerManagerConfig: &v1alpha1.ControllerManagerConfig{
 						ResourcesConfig: &v1alpha1.ResourcesConfig{
-							Limits: v1alpha1.Unstructured{
+							Limits: meta.Unstructured{
 								Object: map[string]any{
 									"memory":   "1m",
 									"invalid2": "23",
@@ -1780,12 +1848,12 @@ func TestValidate(t *testing.T) {
 					},
 					SchedulerConfig: &v1alpha1.SchedulerConfig{
 						ResourcesConfig: &v1alpha1.ResourcesConfig{
-							Requests: v1alpha1.Unstructured{
+							Requests: meta.Unstructured{
 								Object: map[string]any{
 									"cpu": "1m",
 								},
 							},
-							Limits: v1alpha1.Unstructured{
+							Limits: meta.Unstructured{
 								Object: map[string]any{
 									"invalid3": "23",
 								},
@@ -1843,8 +1911,8 @@ func TestValidate(t *testing.T) {
 					},
 					APIServerConfig: &v1alpha1.APIServerConfig{
 						AuthorizationConfigConfig: []*v1alpha1.AuthorizationConfigAuthorizerConfig{},
-						ExtraArgsConfig: map[string]string{
-							"authorization-mode": "Node",
+						ExtraArgsConfig: meta.Args{
+							"authorization-mode": meta.NewArgValue("Node", nil),
 						},
 					},
 				},
@@ -1870,8 +1938,8 @@ func TestValidate(t *testing.T) {
 					},
 					APIServerConfig: &v1alpha1.APIServerConfig{
 						AuthorizationConfigConfig: []*v1alpha1.AuthorizationConfigAuthorizerConfig{},
-						ExtraArgsConfig: map[string]string{
-							"authorization-webhook-version": "v1",
+						ExtraArgsConfig: meta.Args{
+							"authorization-webhook-version": meta.NewArgValue("v1", nil),
 						},
 					},
 				},
@@ -1888,7 +1956,7 @@ func TestValidate(t *testing.T) {
 						Crt: []byte("foo"),
 						Key: []byte("bar"),
 					},
-					MachineBaseRuntimeSpecOverrides: v1alpha1.Unstructured{
+					MachineBaseRuntimeSpecOverrides: meta.Unstructured{
 						Object: map[string]any{
 							"process": map[string]any{
 								"rlimits": []map[string]any{
@@ -1909,6 +1977,9 @@ func TestValidate(t *testing.T) {
 						},
 					},
 				},
+			},
+			expectedWarnings: []string{
+				`.machine.baseRuntimeSpecOverrides is deprecated; use a CRIBaseRuntimeSpecConfig document instead`,
 			},
 		},
 		{
@@ -1934,6 +2005,33 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			expectedError: "1 error occurred:\n\t* invalid node address sort algorithm: xyz does not belong to AddressSortAlgorithm values\n\n",
+		},
+		{
+			name: "ForwardKubeDNSToHostWithoutHostDNS",
+			config: &v1alpha1.Config{
+				ConfigVersion: "v1alpha1",
+				MachineConfig: &v1alpha1.MachineConfig{
+					MachineType: "controlplane",
+					MachineCA: &x509.PEMEncodedCertificateAndKey{
+						Crt: []byte("foo"),
+						Key: []byte("bar"),
+					},
+					MachineFeatures: &v1alpha1.FeaturesConfig{
+						HostDNSSupport: &v1alpha1.HostDNSConfig{
+							HostDNSConfigEnabled:        new(false),
+							HostDNSForwardKubeDNSToHost: new(true),
+						},
+					},
+				},
+				ClusterConfig: &v1alpha1.ClusterConfig{
+					ControlPlane: &v1alpha1.ControlPlaneConfig{
+						Endpoint: &v1alpha1.Endpoint{
+							endpointURL,
+						},
+					},
+				},
+			},
+			expectedError: "1 error occurred:\n\t* feature hostDNS.forwardKubeDNSToHost requires hostDNS.enabled to be true (.machine.features.hostDNS)\n\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2001,6 +2099,24 @@ func TestValidateCNI(t *testing.T) {
 			},
 		},
 		{
+			name: "FlannelKubeNetworkPoliciesDisabled",
+			config: &v1alpha1.CNIConfig{
+				CNIName: constants.FlannelCNI,
+				CNIFlannel: &v1alpha1.FlannelCNIConfig{
+					FlannelKubeNetworkPoliciesEnabled: new(false),
+				},
+			},
+		},
+		{
+			name: "FlannelKubeNetworkPoliciesEnabled",
+			config: &v1alpha1.CNIConfig{
+				CNIName: constants.FlannelCNI,
+				CNIFlannel: &v1alpha1.FlannelCNIConfig{
+					FlannelKubeNetworkPoliciesEnabled: new(true),
+				},
+			},
+		},
+		{
 			name: "CustomNoManifests",
 			config: &v1alpha1.CNIConfig{
 				CNIName: constants.CustomCNI,
@@ -2021,6 +2137,31 @@ func TestValidateCNI(t *testing.T) {
 				},
 			},
 			expectedError: "1 error occurred:\n\t* \"flanneldExtraArgs\" field should be empty for \"custom\" CNI\n\n",
+		},
+		{
+			name: "CustomFlannelKubeNetworkPoliciesDisabled",
+			config: &v1alpha1.CNIConfig{
+				CNIName: constants.CustomCNI,
+				CNIUrls: []string{
+					"https://host.test/quick-install.yaml",
+				},
+				CNIFlannel: &v1alpha1.FlannelCNIConfig{
+					FlannelKubeNetworkPoliciesEnabled: new(false),
+				},
+			},
+		},
+		{
+			name: "CustomFlannelKubeNetworkPoliciesEnabled",
+			config: &v1alpha1.CNIConfig{
+				CNIName: constants.CustomCNI,
+				CNIUrls: []string{
+					"https://host.test/quick-install.yaml",
+				},
+				CNIFlannel: &v1alpha1.FlannelCNIConfig{
+					FlannelKubeNetworkPoliciesEnabled: new(true),
+				},
+			},
+			expectedError: "1 error occurred:\n\t* \"flannelKubeNetworkPoliciesEnabled\" should not be enabled for \"custom\" CNI\n\n",
 		},
 		{
 			name: "CustomManifests",
@@ -2046,6 +2187,25 @@ func TestValidateCNI(t *testing.T) {
 				},
 			},
 			expectedError: "1 error occurred:\n\t* \"urls\" field should be empty for \"none\" CNI\n\n",
+		},
+		{
+			name: "NoneFlannelKubeNetworkPoliciesDisabled",
+			config: &v1alpha1.CNIConfig{
+				CNIName: constants.NoneCNI,
+				CNIFlannel: &v1alpha1.FlannelCNIConfig{
+					FlannelKubeNetworkPoliciesEnabled: new(false),
+				},
+			},
+		},
+		{
+			name: "NoneFlannelKubeNetworkPoliciesEnabled",
+			config: &v1alpha1.CNIConfig{
+				CNIName: constants.NoneCNI,
+				CNIFlannel: &v1alpha1.FlannelCNIConfig{
+					FlannelKubeNetworkPoliciesEnabled: new(true),
+				},
+			},
+			expectedError: "1 error occurred:\n\t* \"flannelKubeNetworkPoliciesEnabled\" should not be enabled for \"none\" CNI\n\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2074,47 +2234,16 @@ func TestValidateCNI(t *testing.T) {
 	}
 }
 
-func TestKubernetesVersionFromImageRef(t *testing.T) {
-	t.Parallel()
-
-	for _, test := range []struct {
-		imageRef string
-
-		expectedVersion string
-	}{
-		{
-			imageRef:        "ghcr.io/siderolabs/kubelet:v1.32.2",
-			expectedVersion: "1.32.2",
-		},
-		{
-			imageRef:        "ghcr.io/siderolabs/kubelet:v1.32.2@sha256:123456",
-			expectedVersion: "1.32.2",
-		},
-	} {
-		t.Run(test.imageRef, func(t *testing.T) {
-			t.Parallel()
-
-			version, err := v1alpha1.KubernetesVersionFromImageRef(test.imageRef)
-			require.NoError(t, err)
-
-			assert.Equal(t, test.expectedVersion, version.String())
-		})
-	}
-}
-
-func TestRuntimeValidate(t *testing.T) {
+func TestValidateKubernetesVersions(t *testing.T) {
 	t.Parallel()
 
 	endpointURL, err := url.Parse("https://localhost:6443/")
 	require.NoError(t, err)
 
 	for _, test := range []struct {
-		name             string
-		config           *v1alpha1.Config
-		requiresInstall  bool
-		strict           bool
-		expectedWarnings []string
-		expectedError    string
+		name          string
+		config        *v1alpha1.Config
+		expectedError string
 	}{
 		{
 			name: "valid",
@@ -2204,16 +2333,7 @@ func TestRuntimeValidate(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			var opts []validation.Option
-			if test.strict {
-				opts = append(opts, validation.WithStrict())
-			}
-
-			st := state.WrapCore(inmem.NewState(""))
-
-			warnings, errors := test.config.RuntimeValidate(t.Context(), st, runtimeMode{test.requiresInstall}, opts...)
-
-			assert.Equal(t, test.expectedWarnings, warnings)
+			errors := test.config.ValidateKubernetesVersions()
 
 			currentTalosVersion, err := compatibility.ParseTalosVersion(version.NewVersion())
 			require.NoError(t, err)

@@ -24,12 +24,15 @@ func TestRegisterResource(t *testing.T) {
 	resourceRegistry := registry.NewResourceRegistry(resources)
 
 	for _, resource := range []meta.ResourceWithRD{
+		&runtime.APIServiceConfig{},
+		&runtime.BootID{},
 		&runtime.BootedEntry{},
 		&runtime.DevicesStatus{},
 		&runtime.Diagnostic{},
 		&runtime.EventSinkConfig{},
 		&runtime.ExtensionStatus{},
 		&runtime.KernelCmdline{},
+		&runtime.KernelModuleStatus{},
 		&runtime.KernelModuleSpec{},
 		&runtime.KernelParamSpec{},
 		&runtime.KernelParamStatus{},
@@ -46,6 +49,7 @@ func TestRegisterResource(t *testing.T) {
 		&runtime.PlatformMetadata{},
 		&runtime.SBOMItem{},
 		&runtime.SecurityState{},
+		&runtime.ServicePID{},
 		&runtime.UniqueMachineToken{},
 		&runtime.WatchdogTimerConfig{},
 		&runtime.WatchdogTimerStatus{},

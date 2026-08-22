@@ -102,7 +102,8 @@ func (e *ExecutorOptions) Generate(ctx context.Context) error {
 			return err
 		}
 
-		e.Arguments = append(e.Arguments,
+		e.Arguments = append(
+			e.Arguments,
 			"-volume_date", "all_file_dates", fmt.Sprintf("=%d", epoch),
 			"-volume_date", "uuid", time.Unix(epoch, 0).Format("2006010215040500"),
 		)
@@ -111,13 +112,14 @@ func (e *ExecutorOptions) Generate(ctx context.Context) error {
 	if quirks.New(e.Version).SupportsISOLabel() {
 		label := Label(e.Version, false)
 
-		e.Arguments = append(e.Arguments,
+		e.Arguments = append(
+			e.Arguments,
 			"-volid", VolumeID(label),
 			"-volset-id", label,
 		)
 	}
 
-	_, err := cmd.RunContext(ctx, e.Command, e.Arguments...)
+	_, err := cmd.RunWithOptions(ctx, e.Command, e.Arguments)
 	if err != nil {
 		return fmt.Errorf("failed to create ISO: %w", err)
 	}

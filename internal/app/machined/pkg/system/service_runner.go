@@ -18,6 +18,7 @@ import (
 	"github.com/siderolabs/talos/internal/app/machined/pkg/runtime"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/system/events"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/system/health"
+	"github.com/siderolabs/talos/internal/app/machined/pkg/system/pid"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/system/runner"
 	"github.com/siderolabs/talos/pkg/conditions"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
@@ -41,6 +42,8 @@ type ServiceRunner struct {
 	state  events.ServiceState
 	events events.ServiceEvents
 
+	pidRecorder pid.Recorder
+
 	healthState health.State
 
 	stateSubscribers map[StateEvent][]chan<- struct{}
@@ -58,6 +61,7 @@ func NewServiceRunner(instance *singleton, service Service, runtime runtime.Runt
 		state:            events.StateInitialized,
 		stateSubscribers: make(map[StateEvent][]chan<- struct{}),
 		stopCh:           make(chan struct{}, 1),
+		pidRecorder:      pid.NewStateRecorder(runtime.State().V1Alpha2().Resources()).Record,
 	}
 }
 
@@ -77,6 +81,9 @@ func (svcrunner *ServiceRunner) UpdateState(ctx context.Context, newstate events
 		Message:   fmt.Sprintf(message, args...),
 		State:     newstate,
 		Timestamp: time.Now(),
+	}
+	if newstate == events.StateRunning {
+		event.Health = svcrunner.healthState.Get()
 	}
 
 	svcrunner.state = newstate
@@ -219,7 +226,9 @@ func (svcrunner *ServiceRunner) Run(notifyChannels ...chan<- struct{}) error {
 	condition := svcrunner.service.Condition(svcrunner.runtime)
 
 	if dependencies := svcrunner.service.DependsOn(svcrunner.runtime); len(dependencies) > 0 {
-		serviceConditions := xslices.Map(dependencies, func(dep string) conditions.Condition { return waitForService(instance, StateEventUp, dep) })
+		serviceConditions := xslices.Map(dependencies, func(dep string) conditions.Condition {
+			return waitForService(instance, []StateEvent{StateEventUp}, dep)
+		})
 		serviceDependencies := conditions.WaitForAll(serviceConditions...)
 
 		condition = conditions.WaitForAll(serviceDependencies, condition)
@@ -251,6 +260,12 @@ func (svcrunner *ServiceRunner) Run(notifyChannels ...chan<- struct{}) error {
 
 	if condition != nil {
 		if err := svcrunner.waitFor(ctx, condition); err != nil {
+			// a canceled context here means the service was shut down before it
+			// started running; treat it as a clean stop (mirrors run(), see below)
+			if ctx.Err() != nil {
+				return nil
+			}
+
 			return fmt.Errorf("condition failed: %w", err)
 		}
 	}
@@ -258,6 +273,11 @@ func (svcrunner *ServiceRunner) Run(notifyChannels ...chan<- struct{}) error {
 	svcrunner.UpdateState(ctx, events.StatePreparing, "Running pre state")
 
 	if err := svcrunner.service.PreFunc(ctx, svcrunner.runtime); err != nil {
+		// see above: a canceled context means the service was shut down
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		return fmt.Errorf("failed to run pre stage: %w", err)
 	}
 
@@ -311,22 +331,12 @@ func (svcrunner *ServiceRunner) run(ctx context.Context, runnr runner.Runner) er
 			if _, healthSupported := svcrunner.service.(HealthcheckedService); healthSupported && s != events.StateRunning {
 				svcrunner.healthState.Update(false, "service not running")
 			}
-		})
+		}, svcrunner.pidRecorder)
 	}()
 
 	if healthSvc, ok := svcrunner.service.(HealthcheckedService); ok {
 		var healthWg sync.WaitGroup
 		defer healthWg.Wait()
-
-		healthWg.Go(func() {
-			//nolint:errcheck
-			health.Run(
-				ctx,
-				healthSvc.HealthSettings(svcrunner.runtime),
-				&svcrunner.healthState,
-				healthSvc.HealthFunc(svcrunner.runtime),
-			)
-		})
 
 		notifyCh := make(chan health.StateChange, 2)
 
@@ -342,6 +352,16 @@ func (svcrunner *ServiceRunner) run(ctx context.Context, runnr runner.Runner) er
 					svcrunner.healthUpdate(ctx, change)
 				}
 			}
+		})
+
+		healthWg.Go(func() {
+			//nolint:errcheck
+			health.Run(
+				ctx,
+				healthSvc.HealthSettings(svcrunner.runtime),
+				&svcrunner.healthState,
+				healthSvc.HealthFunc(svcrunner.runtime),
+			)
 		})
 	}
 
@@ -445,10 +465,10 @@ func (svcrunner *ServiceRunner) inStateLocked(event StateEvent) bool {
 	switch event {
 	case StateEventUp:
 		// up when:
-		//   a) either skipped or already finished
+		//   a) skipped
 		//   b) or running and healthy (if supports health checks)
 		switch svcrunner.state { //nolint:exhaustive
-		case events.StateSkipped, events.StateFinished:
+		case events.StateSkipped:
 			return true
 		case events.StateRunning:
 			// check if service supports health checks
@@ -468,11 +488,7 @@ func (svcrunner *ServiceRunner) inStateLocked(event StateEvent) bool {
 			return false
 		}
 	case StateEventFinished:
-		if svcrunner.state == events.StateFinished {
-			return true
-		}
-
-		return false
+		return svcrunner.state == events.StateFinished
 	default:
 		panic("unsupported event")
 	}

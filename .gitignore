@@ -9,6 +9,7 @@ init.yaml
 controlplane.yaml
 join.yaml
 worker.yaml
+machineconfig.yaml
 talosconfig
 /kubeconfig
 hack/test/libvirt/matchbox/assets/*
@@ -23,6 +24,7 @@ hack/test/libvirt/matchbox/assets/*
 
 # Go
 .artifacts/
+custom-gcl
 go.work.sum
 
 sha256sum.txt

@@ -1,5 +1,12 @@
 addresses: []
-links: []
+links:
+    - name: eth0
+      logical: false
+      up: true
+      mtu: 0
+      kind: ""
+      type: netrom
+      layer: platform
 routes: []
 hostnames:
     - hostname: talos
@@ -11,7 +18,13 @@ timeServers:
         - 169.254.169.123
         - fd00:ec2::123
       layer: platform
-operators: []
+operators:
+    - operator: dhcp4
+      linkName: eth0
+      requireUp: true
+      dhcp4:
+        routeMetric: 1024
+      layer: platform
 externalIPs:
     - 1.2.3.4
 metadata:
@@ -19,7 +32,10 @@ metadata:
     hostname: talos
     region: us-east-1
     zone: us-east-1a
+    instanceType: t3.micro
     instanceId: i-0a0a0a0a0a0a0a0a0
     providerId: aws:///us-east-1a/i-0a0a0a0a0a0a0a0a0
+    internalDNS: ip-10-0-0-10.ec2.internal
+    externalDNS: ec2-1-2-3-4.compute-1.amazonaws.com
     tags:
         cluster: mycluster

@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/siderolabs/go-pointer"
-
 	"github.com/siderolabs/talos/pkg/machinery/config/config"
 )
 
@@ -35,7 +33,7 @@ type selector struct {
 
 func (s *selector) Kind() string           { return s.docKind }
 func (s *selector) APIVersion() string     { return s.docAPIVersion }
-func (s *selector) Clone() config.Document { return pointer.To(s.clone()) }
+func (s *selector) Clone() config.Document { return new(s.clone()) }
 func (s *selector) DocIdx() int            { return s.docIdx }
 
 func (s *selector) PathAsString() string { return strings.Join(s.path, ".") }
@@ -134,13 +132,17 @@ var searchForType = reflect.TypeFor[string]()
 // ErrLookupFailed is returned when the lookup failed.
 var ErrLookupFailed = errors.New("lookup failed")
 
-//nolint:gocyclo
+//nolint:gocyclo,cyclop
 func deleteForPath(val reflect.Value, path []string, key, value string) error {
 	if len(path) == 0 {
 		return errors.New("path is empty")
 	}
 
 	if val.Kind() == reflect.Pointer || val.Kind() == reflect.Interface {
+		if val.IsNil() {
+			return ErrLookupFailed
+		}
+
 		return deleteForPath(val.Elem(), path, key, value)
 	}
 
@@ -168,6 +170,20 @@ func deleteForPath(val reflect.Value, path []string, key, value string) error {
 				}
 
 				return deleteForPath(val.Field(i), path, key, value)
+			}
+
+			// if there is an embedded struct, descend into it
+			if len(yamlTags) > 1 && yamlTags[0] == "" && yamlTags[1] == "inline" {
+				err := deleteForPath(val.Field(i), append([]string{searchFor}, path...), key, value)
+				if err == nil {
+					// value found & deleted
+					return nil
+				}
+
+				// ignore lookup failed errors, we can continue with other fields
+				if !errors.Is(err, ErrLookupFailed) {
+					return err
+				}
 			}
 		}
 	case reflect.Map:
@@ -242,7 +258,17 @@ func deleteStructFrom(searchIn reflect.Value, searchFor string, path []string, k
 					continue
 				}
 
-				if elem.Field(j).String() != value {
+				fieldVal := elem.Field(j)
+				fieldStr := fieldVal.String()
+
+				// if the field value implements Stringer, use it for comparison instead of the default string conversion
+				if fieldVal.CanInterface() {
+					if stringer, ok := fieldVal.Interface().(fmt.Stringer); ok {
+						fieldStr = stringer.String()
+					}
+				}
+
+				if fieldStr != value {
 					continue
 				}
 

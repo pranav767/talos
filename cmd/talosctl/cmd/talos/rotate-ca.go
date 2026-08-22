@@ -49,7 +49,21 @@ PKI can be rotated by applying machine config changes to the controlplane nodes.
 			return err
 		}
 
-		return WithClient(rotateCA)
+		ctx := cmd.Context()
+
+		clientFactory, err := NewClientFactory(ctx, &rotateCACmdFlags)
+		if err != nil {
+			return err
+		}
+
+		defer clientFactory.Close() //nolint:errcheck
+
+		ctx, c, _, err := clientFactory.BuildClientEnforceSingleNode(ctx, "rotate-ca")
+		if err != nil {
+			return err
+		}
+
+		return rotateCA(ctx, c)
 	},
 }
 
@@ -65,7 +79,7 @@ func rotateCA(ctx context.Context, c *client.Client) error {
 
 	encoderOpt := encoder.WithComments(commentsFlags)
 
-	clusterInfo, err := buildClusterInfo(rotateCACmdFlags.clusterState)
+	clusterInfo, err := buildClusterInfo(ctx, c, rotateCACmdFlags.clusterState)
 	if err != nil {
 		return err
 	}
@@ -149,6 +163,8 @@ func rotateKubernetesCA(ctx context.Context, c *client.Client, encoderOpt encode
 
 		TalosClient: c,
 		ClusterInfo: clusterInfo,
+
+		KubernetesEndpoint: rotateCACmdFlags.forceEndpoint,
 
 		NewKubernetesCA: newBundle.Certs.K8s,
 

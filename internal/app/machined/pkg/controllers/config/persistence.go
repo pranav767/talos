@@ -47,6 +47,12 @@ func (ctrl *PersistenceController) Inputs() []controller.Input {
 		},
 		{
 			Namespace: block.NamespaceName,
+			Type:      block.VolumeStatusType,
+			ID:        optional.Some(constants.StatePartitionLabel),
+			Kind:      controller.InputWeak,
+		},
+		{
+			Namespace: block.NamespaceName,
 			Type:      block.VolumeMountRequestType,
 			Kind:      controller.InputDestroyReady,
 		},
@@ -76,7 +82,7 @@ func (ctrl *PersistenceController) Outputs() []controller.Output {
 
 // Run implements controller.Controller interface.
 //
-//nolint:gocyclo
+//nolint:gocyclo,cyclop
 func (ctrl *PersistenceController) Run(ctx context.Context, r controller.Runtime, logger *zap.Logger) error {
 	for {
 		select {
@@ -101,6 +107,11 @@ func (ctrl *PersistenceController) Run(ctx context.Context, r controller.Runtime
 			}
 		}
 
+		stateStatus, err := safe.ReaderGetByID[*block.VolumeStatus](ctx, r, constants.StatePartitionLabel)
+		if err != nil && !state.IsNotFoundError(err) {
+			return fmt.Errorf("error fetching STATE volume status: %w", err)
+		}
+
 		cfg, err := safe.ReaderGetByID[*config.MachineConfig](ctx, r, config.PersistentID)
 		if err != nil && !state.IsNotFoundError(err) {
 			return fmt.Errorf("error getting config: %w", err)
@@ -121,7 +132,8 @@ func (ctrl *PersistenceController) Run(ctx context.Context, r controller.Runtime
 		}
 
 		if ctrl.stateMachine != nil {
-			err := ctrl.stateMachine.Run(ctx, r, logger,
+			err := ctrl.stateMachine.Run(
+				ctx, r, logger,
 				automaton.WithAfterFunc(func() error {
 					ctrl.stateMachine = nil
 
@@ -136,7 +148,7 @@ func (ctrl *PersistenceController) Run(ctx context.Context, r controller.Runtime
 		}
 
 		if volumeLifecycle.Metadata().Phase() == resource.PhaseTearingDown {
-			if ctrl.configToPersist == nil {
+			if ctrl.configToPersist == nil || (stateStatus != nil && stateStatus.TypedSpec().Phase == block.VolumePhaseMissing) {
 				if err = r.RemoveFinalizer(ctx, volumeLifecycle.Metadata(), ctrl.Name()); err != nil {
 					return fmt.Errorf("error removing finalizer: %w", err)
 				}

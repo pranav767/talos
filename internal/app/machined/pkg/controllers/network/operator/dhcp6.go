@@ -182,7 +182,9 @@ func (d *DHCP6) parseReply(reply *dhcpv6.Message) (leaseTime time.Duration) {
 
 		d.resolvers = []network.ResolverSpecSpec{
 			{
-				DNSServers:  xslices.Map(reply.Options.DNS(), convertIP),
+				NameServers: xslices.Map(reply.Options.DNS(), func(ip net.IP) network.NameServerSpec {
+					return network.NameServerSpec{Addr: convertIP(ip)}
+				}),
 				ConfigLayer: network.ConfigOperator,
 			},
 		}
@@ -230,16 +232,12 @@ func (d *DHCP6) renew(ctx context.Context) (time.Duration, error) {
 
 	defer cli.Close() //nolint:errcheck
 
-	var modifiers []dhcpv6.Modifier
-
 	clientIdentifierModifiers, err := GetDHCPv6ClientIdentifier(ctx, d.state, d.logger, d.linkName, d.clientIdentifier)
 	if err != nil {
 		return 0, fmt.Errorf("error getting DHCPv6 client identifier: %w", err)
 	}
 
-	modifiers = append(modifiers, clientIdentifierModifiers...)
-
-	reply, err := cli.RapidSolicit(ctx, modifiers...)
+	reply, err := cli.RapidSolicit(ctx, clientIdentifierModifiers...)
 	if err != nil {
 		return 0, err
 	}
@@ -290,7 +288,7 @@ func (d *DHCP6) isIPv6LinkReady(iface *net.Interface, conn *rtnetlink.Conn) (boo
 
 		if addr.Attributes.Address.IsLinkLocalUnicast() && (addr.Flags&unix.IFA_F_TENTATIVE == 0) {
 			if addr.Flags&unix.IFA_F_DADFAILED != 0 {
-				d.logger.Warn("DADFAILED for %v, continuing anyhow", zap.Stringer("address", addr.Attributes.Address), zap.String("link", d.linkName))
+				d.logger.Warn("DAD failed, continuing", zap.Stringer("address", addr.Attributes.Address), zap.String("link", d.linkName))
 			}
 
 			return true, nil

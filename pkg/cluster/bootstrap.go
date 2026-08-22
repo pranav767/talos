@@ -13,13 +13,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cosi-project/runtime/pkg/safe"
 	"github.com/siderolabs/go-retry/retry"
-	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
 
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	"github.com/siderolabs/talos/pkg/machinery/client"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
+	"github.com/siderolabs/talos/pkg/machinery/resources/runtime"
 )
 
 // APIBootstrapper bootstraps cluster via Talos API.
@@ -48,7 +49,7 @@ func (s *APIBootstrapper) Bootstrap(ctx context.Context, out io.Writer) error {
 	slices.SortFunc(controlPlaneNodes, func(a, b NodeInfo) int { return strings.Compare(a.IPs[0].String(), b.IPs[0].String()) })
 
 	nodeIP := controlPlaneNodes[0].IPs[0]
-	nodeCtx := client.WithNodes(ctx, nodeIP.String())
+	nodeCtx := client.WithNode(ctx, nodeIP.String())
 
 	fmt.Fprintln(out, "waiting for Talos API (to bootstrap the cluster)")
 
@@ -60,6 +61,19 @@ func (s *APIBootstrapper) Bootstrap(ctx context.Context, out io.Writer) error {
 			return retry.ExpectedError(err)
 		}
 
+		machineStatus, err := safe.ReaderGetByID[*runtime.MachineStatus](retryCtx, cli.COSI, runtime.MachineStatusID)
+		if err != nil {
+			return retry.ExpectedError(err)
+		}
+
+		switch machineStatus.TypedSpec().Stage {
+		case runtime.MachineStageBooting, runtime.MachineStageRunning:
+			return nil
+		case runtime.MachineStageUnknown, runtime.MachineStageMaintenance, runtime.MachineStageInstalling,
+			runtime.MachineStageRebooting, runtime.MachineStageShuttingDown, runtime.MachineStageResetting, runtime.MachineStageUpgrading:
+			return retry.ExpectedError(fmt.Errorf("machine in unexpected stage %s", machineStatus.TypedSpec().Stage))
+		}
+
 		return nil
 	})
 	if err != nil {
@@ -68,18 +82,23 @@ func (s *APIBootstrapper) Bootstrap(ctx context.Context, out io.Writer) error {
 
 	fmt.Fprintln(out, "bootstrapping cluster")
 
-	return retry.Constant(backoff.DefaultConfig.MaxDelay, retry.WithUnits(100*time.Millisecond)).RetryWithContext(nodeCtx, func(nodeCtx context.Context) error {
+	return retry.Constant(10*time.Minute, retry.WithUnits(500*time.Millisecond)).RetryWithContext(nodeCtx, func(nodeCtx context.Context) error {
 		retryCtx, cancel := context.WithTimeout(nodeCtx, 2*time.Second)
 		defer cancel()
 
 		if err = cli.Bootstrap(retryCtx, &machineapi.BootstrapRequest{}); err != nil {
+			statusCode := client.StatusCode(err)
+
 			switch {
 			// deadline exceeded in case it's verbatim context error
 			case errors.Is(err, context.DeadlineExceeded):
 				return retry.ExpectedError(err)
 			// FailedPrecondition when time is not in sync yet on the server
 			// DeadlineExceeded when the call fails in the gRPC stack either on the server or client side
-			case client.StatusCode(err) == codes.FailedPrecondition || client.StatusCode(err) == codes.DeadlineExceeded:
+			// Canceled is when apid restarts on transitioning maintenance -> ready
+			// Unavailable is when apid or the network is still coming up
+			case statusCode == codes.FailedPrecondition || statusCode == codes.DeadlineExceeded ||
+				statusCode == codes.Canceled || statusCode == codes.Unavailable:
 				return retry.ExpectedError(err)
 			// connection refused, including proxied connection refused via the endpoint to the node
 			case strings.Contains(err.Error(), "connection refused"):
@@ -87,6 +106,11 @@ func (s *APIBootstrapper) Bootstrap(ctx context.Context, out io.Writer) error {
 			// connection timeout
 			case strings.Contains(err.Error(), "error reading from server: EOF"):
 				return retry.ExpectedError(err)
+			case statusCode == codes.InvalidArgument:
+				// no etcd, skipping bootstrap
+				fmt.Fprintln(out, "skipping bootstrap, no etcd configured")
+
+				return nil
 			}
 
 			return err

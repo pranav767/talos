@@ -8,7 +8,7 @@ import (
 	"encoding"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // Check interfaces.
@@ -114,4 +114,17 @@ func (s Size) IsZero() bool {
 // IsRelative returns if the Size is a relative size.
 func (s Size) IsRelative() bool {
 	return (s.PercentageSize != nil && !s.PercentageSize.IsZero())
+}
+
+// IsNegative returns true if the value is negative.
+func (s Size) IsNegative() bool {
+	if s.ByteSize != nil {
+		return s.ByteSize.IsNegative()
+	}
+
+	if s.PercentageSize != nil {
+		return s.PercentageSize.IsNegative()
+	}
+
+	return false
 }

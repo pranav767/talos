@@ -9,6 +9,7 @@
 package fsopen
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -33,9 +34,18 @@ type FS struct {
 	boolParams   map[string]struct{}
 	stringParams map[string][]string
 	binaryParams map[string][][]byte
+	fdParams     []fdParam
 
 	mntfd    int
 	mntflags int
+}
+
+// fdParam is an ordered fsconfig FSCONFIG_SET_FD parameter (e.g. an overlayfs
+// "lowerdir+" layer passed by file descriptor). Order is preserved as the relative
+// priority of repeated keys (e.g. lowerdir+) is significant.
+type fdParam struct {
+	key string
+	fd  int
 }
 
 // Interface guard.
@@ -129,6 +139,12 @@ func (fs *FS) new() (err error) {
 		}
 	}
 
+	for _, p := range fs.fdParams {
+		if err := unix.FsconfigSetFd(fsfd, p.key, p.fd); err != nil {
+			return fmt.Errorf("FSCONFIG_SET_FD failed: %w: key=%q fd=%d", err, p.key, p.fd)
+		}
+	}
+
 	err = unix.FsconfigCreate(fsfd)
 	if err != nil {
 		return fmt.Errorf("FSCONFIG_CMD_CREATE failed: %w", err)
@@ -157,19 +173,22 @@ func (fs *FS) Close() error {
 }
 
 // Repair attempts to repair the filesystem if it is in a dirty state.
-func (fs *FS) Repair() error {
-	var repairFunc func(partition string) error
+func (fs *FS) Repair(ctx context.Context) error {
+	var repairFunc func(ctx context.Context, partition string) error
 
 	switch fs.fstype {
 	case makefs.FilesystemTypeEXT4:
 		repairFunc = makefs.Ext4Repair
 	case makefs.FilesystemTypeXFS:
 		repairFunc = makefs.XFSRepair
+	case makefs.FilesystemTypeBTRFS:
+		// disable repair for btrfs, as it is dangerous and can make things worse
+		fallthrough
 	default:
 		return fmt.Errorf("%w: %s", ErrRepairUnsupported, fs.fstype)
 	}
 
-	if err := repairFunc(fs.source); err != nil {
+	if err := repairFunc(ctx, fs.source); err != nil {
 		return fmt.Errorf("repair %q: %w", fs.source, err)
 	}
 

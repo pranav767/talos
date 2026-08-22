@@ -12,16 +12,15 @@ import (
 	"time"
 
 	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
+	"go.uber.org/zap"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	kubespanadapter "github.com/siderolabs/talos/internal/app/machined/pkg/adapters/kubespan"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/ctest"
 	kubespanctrl "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/kubespan"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
-	"github.com/siderolabs/talos/pkg/machinery/fipsmode"
 	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"github.com/siderolabs/talos/pkg/machinery/resources/kubespan"
@@ -70,21 +69,8 @@ func (mock *mockWireguardClient) Close() error {
 	return nil
 }
 
-type mockRulesManager struct{}
-
-func (mock mockRulesManager) Install() error {
-	return nil
-}
-
-func (mock mockRulesManager) Cleanup() error {
-	return nil
-}
-
+//nolint:dupl
 func (suite *ManagerSuite) TestReconcile() {
-	if fipsmode.Strict() {
-		suite.T().Skip("skipping test in strict FIPS mode")
-	}
-
 	cfg := kubespan.NewConfig(config.NamespaceName, kubespan.ConfigID)
 	cfg.TypedSpec().Enabled = true
 	cfg.TypedSpec().SharedSecret = "TPbGXrYlvuXgAl8dERpwjlA5tnEMoihPDPxlovcLtVg="
@@ -95,7 +81,7 @@ func (suite *ManagerSuite) TestReconcile() {
 	suite.Require().NoError(err)
 
 	localIdentity := kubespan.NewIdentity(kubespan.NamespaceName, kubespan.LocalIdentity)
-	suite.Require().NoError(kubespanadapter.IdentitySpec(localIdentity.TypedSpec()).GenerateKey())
+	suite.Require().NoError(kubespanadapter.IdentitySpec(localIdentity.TypedSpec()).GenerateKey(zap.NewNop()))
 	suite.Require().NoError(
 		kubespanadapter.IdentitySpec(localIdentity.TypedSpec()).UpdateAddress(
 			"v16UCWpO2iOm82n6F8dGCJ41ZXXBvDrjRDs2su7C_zs=",
@@ -105,7 +91,8 @@ func (suite *ManagerSuite) TestReconcile() {
 	suite.Require().NoError(suite.State().Create(suite.Ctx(), localIdentity))
 
 	// initial setup: link should be created without any peers
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		network.LayeredID(network.ConfigOperator, network.LinkID(constants.KubeSpanLinkName)),
 		func(res *network.LinkSpec, asrt *assert.Assertions) {
 			spec := res.TypedSpec()
@@ -141,7 +128,8 @@ func (suite *ManagerSuite) TestReconcile() {
 			asrt.Equal(nethelpers.ScopeGlobal, spec.Scope)
 		}, rtestutils.WithNamespace(network.ConfigNamespaceName))
 
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		network.LayeredID(
 			network.ConfigOperator,
 			network.RouteID(
@@ -157,7 +145,8 @@ func (suite *ManagerSuite) TestReconcile() {
 		rtestutils.WithNamespace(network.ConfigNamespaceName),
 	)
 
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		network.LayeredID(
 			network.ConfigOperator,
 			network.RouteID(
@@ -170,6 +159,53 @@ func (suite *ManagerSuite) TestReconcile() {
 			),
 		),
 		func(res *network.RouteSpec, asrt *assert.Assertions) {},
+		rtestutils.WithNamespace(network.ConfigNamespaceName),
+	)
+
+	// check routing rules (IPv4 + IPv6)
+	ctest.AssertResource(
+		suite,
+		network.LayeredID(
+			network.ConfigOperator,
+			network.RoutingRuleID(
+				nethelpers.FamilyInet4,
+				constants.KubeSpanDefaultRulePriority,
+			),
+		),
+		func(res *network.RoutingRuleSpec, asrt *assert.Assertions) {
+			spec := res.TypedSpec()
+
+			asrt.Equal(nethelpers.FamilyInet4, spec.Family)
+			asrt.Equal(nethelpers.RoutingTable(constants.KubeSpanDefaultRoutingTable), spec.Table)
+			asrt.Equal(nethelpers.RoutingRuleActionUnicast, spec.Action)
+			asrt.Equal(uint32(constants.KubeSpanDefaultForceFirewallMark), spec.FwMark)
+			asrt.Equal(uint32(constants.KubeSpanDefaultFirewallMask), spec.FwMask)
+			asrt.Equal(uint32(constants.KubeSpanDefaultRulePriority), spec.Priority)
+			asrt.Equal(network.ConfigOperator, spec.ConfigLayer)
+		},
+		rtestutils.WithNamespace(network.ConfigNamespaceName),
+	)
+
+	ctest.AssertResource(
+		suite,
+		network.LayeredID(
+			network.ConfigOperator,
+			network.RoutingRuleID(
+				nethelpers.FamilyInet6,
+				constants.KubeSpanDefaultRulePriority,
+			),
+		),
+		func(res *network.RoutingRuleSpec, asrt *assert.Assertions) {
+			spec := res.TypedSpec()
+
+			asrt.Equal(nethelpers.FamilyInet6, spec.Family)
+			asrt.Equal(nethelpers.RoutingTable(constants.KubeSpanDefaultRoutingTable), spec.Table)
+			asrt.Equal(nethelpers.RoutingRuleActionUnicast, spec.Action)
+			asrt.Equal(uint32(constants.KubeSpanDefaultForceFirewallMark), spec.FwMark)
+			asrt.Equal(uint32(constants.KubeSpanDefaultFirewallMask), spec.FwMask)
+			asrt.Equal(uint32(constants.KubeSpanDefaultRulePriority), spec.Priority)
+			asrt.Equal(network.ConfigOperator, spec.ConfigLayer)
+		},
 		rtestutils.WithNamespace(network.ConfigNamespaceName),
 	)
 
@@ -202,7 +238,8 @@ func (suite *ManagerSuite) TestReconcile() {
 	key2, err := wgtypes.ParseKey(peer2.Metadata().ID())
 	suite.Require().NoError(err)
 
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		network.LayeredID(network.ConfigOperator, network.LinkID(constants.KubeSpanLinkName)),
 		func(res *network.LinkSpec, asrt *assert.Assertions) {
 			spec := res.TypedSpec()
@@ -224,7 +261,8 @@ func (suite *ManagerSuite) TestReconcile() {
 	)
 
 	for _, peer := range []*kubespan.PeerSpec{peer1, peer2} {
-		ctest.AssertResource(suite,
+		ctest.AssertResource(
+			suite,
 			peer.Metadata().ID(),
 			func(res *kubespan.PeerStatus, asrt *assert.Assertions) {
 				spec := res.TypedSpec()
@@ -239,7 +277,8 @@ func (suite *ManagerSuite) TestReconcile() {
 	}
 
 	// check firewall rules
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		"kubespan_prerouting",
 		func(res *network.NfTablesChain, asrt *assert.Assertions) {
 			spec := res.TypedSpec()
@@ -261,7 +300,7 @@ func (suite *ManagerSuite) TestReconcile() {
 						Mask:  constants.KubeSpanDefaultFirewallMask,
 						Value: constants.KubeSpanDefaultFirewallMark,
 					},
-					Verdict: pointer.To(nethelpers.VerdictAccept),
+					Verdict: new(nethelpers.VerdictAccept),
 				},
 				spec.Rules[0],
 			)
@@ -278,7 +317,7 @@ func (suite *ManagerSuite) TestReconcile() {
 						Mask: ^uint32(constants.KubeSpanDefaultFirewallMask),
 						Xor:  constants.KubeSpanDefaultForceFirewallMark,
 					},
-					Verdict: pointer.To(nethelpers.VerdictAccept),
+					Verdict: new(nethelpers.VerdictAccept),
 				},
 				spec.Rules[1],
 			)
@@ -289,7 +328,8 @@ func (suite *ManagerSuite) TestReconcile() {
 	cfg.TypedSpec().ForceRouting = false
 	suite.Require().NoError(suite.State().Update(suite.Ctx(), cfg))
 
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		"kubespan_prerouting",
 		func(res *network.NfTablesChain, asrt *assert.Assertions) {
 			spec := res.TypedSpec()
@@ -303,7 +343,7 @@ func (suite *ManagerSuite) TestReconcile() {
 						Mask: ^uint32(constants.KubeSpanDefaultFirewallMask),
 						Xor:  constants.KubeSpanDefaultForceFirewallMark,
 					},
-					Verdict: pointer.To(nethelpers.VerdictAccept),
+					Verdict: new(nethelpers.VerdictAccept),
 				},
 				spec.Rules[1],
 			)
@@ -329,7 +369,8 @@ func (suite *ManagerSuite) TestReconcile() {
 	)
 
 	for _, peer := range []*kubespan.PeerSpec{peer1, peer2} {
-		ctest.AssertResource(suite,
+		ctest.AssertResource(
+			suite,
 			peer.Metadata().ID(),
 			func(res *kubespan.PeerStatus, asrt *assert.Assertions) {
 				spec := res.TypedSpec()
@@ -339,7 +380,8 @@ func (suite *ManagerSuite) TestReconcile() {
 		)
 	}
 
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		"kubespan_prerouting",
 		func(res *network.NfTablesChain, asrt *assert.Assertions) {
 			spec := res.TypedSpec()
@@ -356,7 +398,7 @@ func (suite *ManagerSuite) TestReconcile() {
 						Mask: ^uint32(constants.KubeSpanDefaultFirewallMask),
 						Xor:  constants.KubeSpanDefaultForceFirewallMark,
 					},
-					Verdict: pointer.To(nethelpers.VerdictAccept),
+					Verdict: new(nethelpers.VerdictAccept),
 				},
 				spec.Rules[1],
 			)
@@ -375,6 +417,28 @@ func (suite *ManagerSuite) TestReconcile() {
 	ctest.AssertNoResource[*network.NfTablesChain](
 		suite,
 		"kubespan_prerouting",
+	)
+	ctest.AssertNoResource[*network.RoutingRuleSpec](
+		suite,
+		network.LayeredID(
+			network.ConfigOperator,
+			network.RoutingRuleID(
+				nethelpers.FamilyInet4,
+				constants.KubeSpanDefaultRulePriority,
+			),
+		),
+		rtestutils.WithNamespace(network.ConfigNamespaceName),
+	)
+	ctest.AssertNoResource[*network.RoutingRuleSpec](
+		suite,
+		network.LayeredID(
+			network.ConfigOperator,
+			network.RoutingRuleID(
+				nethelpers.FamilyInet6,
+				constants.KubeSpanDefaultRulePriority,
+			),
+		),
+		rtestutils.WithNamespace(network.ConfigNamespaceName),
 	)
 }
 
@@ -401,9 +465,6 @@ func TestManagerSuite(t *testing.T) {
 				s.Require().NoError(s.Runtime().RegisterController(&kubespanctrl.ManagerController{
 					WireguardClientFactory: func() (kubespanctrl.WireguardClient, error) {
 						return mockWireguard, nil
-					},
-					RulesManagerFactory: func(_ uint8, _, _ uint32) kubespanctrl.RulesManager {
-						return mockRulesManager{}
 					},
 					PeerReconcileInterval: time.Second,
 				}))

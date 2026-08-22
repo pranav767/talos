@@ -8,7 +8,6 @@ import (
 	"maps"
 
 	"github.com/siderolabs/gen/optional"
-	"github.com/siderolabs/go-pointer"
 
 	"github.com/siderolabs/talos/pkg/machinery/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
@@ -44,6 +43,15 @@ func WithLocalAPIServerPort(port int) Option {
 func WithKubePrismPort(port int) Option {
 	return func(o *Options) error {
 		o.KubePrismPort = optional.Some(port)
+
+		return nil
+	}
+}
+
+// WithSkipUnattendedInstallConfig specifies whether to skip generating UnattendedInstallConfig.
+func WithSkipUnattendedInstallConfig(skip bool) Option {
+	return func(o *Options) error {
+		o.SkipUnattendedInstallConfig = skip
 
 		return nil
 	}
@@ -151,10 +159,10 @@ func WithDebug(enable bool) Option {
 	}
 }
 
-// WithClusterCNIConfig specifies custom cluster CNI config.
-func WithClusterCNIConfig(config *v1alpha1.CNIConfig) Option {
+// WithCustomCNIUrl specifies custom cluster CNI config.
+func WithCustomCNIUrl(manifestURL string) Option {
 	return func(o *Options) error {
-		o.CNIConfig = config
+		o.CNICustomURL = manifestURL
 
 		return nil
 	}
@@ -201,7 +209,7 @@ func WithRoles(roles role.Set) Option {
 // WithClusterDiscovery enables cluster discovery feature.
 func WithClusterDiscovery(enabled bool) Option {
 	return func(o *Options) error {
-		o.DiscoveryEnabled = pointer.To(enabled)
+		o.DiscoveryEnabled = new(enabled)
 
 		return nil
 	}
@@ -238,6 +246,15 @@ func WithHostDNSForwardKubeDNSToHost(forward bool) Option {
 	}
 }
 
+// WithKubeSpanEnabled specifies whether KubeSpan is enabled.
+func WithKubeSpanEnabled(enabled bool) Option {
+	return func(o *Options) error {
+		o.KubeSpanEnabled = optional.Some(enabled)
+
+		return nil
+	}
+}
+
 // Options describes generate parameters.
 type Options struct {
 	VersionContract *config.VersionContract
@@ -269,7 +286,7 @@ type Options struct {
 
 	// Cluster settings.
 	DNSDomain                      string
-	CNIConfig                      *v1alpha1.CNIConfig
+	CNICustomURL                   string
 	AllowSchedulingOnControlPlanes bool
 	LocalAPIServerPort             int
 	AdditionalSubjectAltNames      []string
@@ -278,6 +295,10 @@ type Options struct {
 	KubePrismPort optional.Optional[int]
 
 	HostDNSForwardKubeDNSToHost optional.Optional[bool]
+
+	KubeSpanEnabled optional.Optional[bool]
+
+	SkipUnattendedInstallConfig bool
 
 	// Client options.
 	Roles        role.Set

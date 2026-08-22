@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 
+	"github.com/siderolabs/gen/optional"
 	"github.com/siderolabs/go-cmd/pkg/cmd"
 	"golang.org/x/sys/unix"
 )
@@ -20,10 +22,36 @@ const (
 	FilesystemTypeXFS = "xfs"
 )
 
+// XFSConcurrency computes the value for the mkfs.xfs `concurrency=` option which keeps the
+// allocation groups at or above minAGSize bytes.
+//
+// On non-rotational devices mkfs.xfs sizes the allocation group count to the number of CPUs,
+// bounding the allocation group size from below at 4 GiB only. On a machine with many cores and a
+// modest disk that produces hundreds of tiny allocation groups, which squeezes the AG-local
+// reflink/rmap metadata and inflates the journal at the same time. Capping the concurrency level
+// restores a sane geometry.
+//
+// The zero optional means that the option should not be passed at all (mkfs.xfs defaults apply).
+// A value of 0 forces the classic geometry. 1 is never returned, as mkfs.xfs reads it as the magic
+// "number of CPUs" value rather than as a literal count.
+func XFSConcurrency(deviceSize, minAGSize uint64, numCPU int) optional.Optional[int] {
+	if minAGSize == 0 || deviceSize == 0 || numCPU <= 0 {
+		return optional.None[int]()
+	}
+
+	concurrency := min(uint64(numCPU), deviceSize/minAGSize)
+
+	if concurrency < 2 {
+		return optional.Some(0)
+	}
+
+	return optional.Some(int(concurrency))
+}
+
 // XFSGrow expands a XFS filesystem to the maximum possible. The partition
 // MUST be mounted, or this will fail.
-func XFSGrow(partname string) error {
-	_, err := cmd.Run("xfs_growfs", "-d", partname)
+func XFSGrow(ctx context.Context, partname string) error {
+	_, err := cmd.RunWithOptions(ctx, "xfs_growfs", []string{"-d", partname})
 	if err != nil {
 		return fmt.Errorf("failed to grow XFS filesystem: %w", err)
 	}
@@ -32,8 +60,8 @@ func XFSGrow(partname string) error {
 }
 
 // XFSRepair repairs a XFS filesystem on the specified partition.
-func XFSRepair(partname string) error {
-	_, err := cmd.Run("xfs_repair", partname)
+func XFSRepair(ctx context.Context, partname string) error {
+	_, err := cmd.RunWithOptions(ctx, "xfs_repair", []string{partname})
 	if err != nil {
 		return fmt.Errorf("error repairing XFS filesystem: %w", err)
 	}
@@ -68,6 +96,20 @@ func XFS(ctx context.Context, partname string, setters ...Option) error {
 
 	if opts.UnsupportedFSOption {
 		args = append(args, "--unsupported")
+	}
+
+	if opts.SectorSize > 0 {
+		args = append(args, "-s", fmt.Sprintf("size=%d", opts.SectorSize))
+	}
+
+	// bound both the allocation group geometry and the journal, as mkfs.xfs scales both by the
+	// number of CPUs on non-rotational devices
+	if concurrency, ok := XFSConcurrency(opts.DeviceSize, opts.MinAllocationGroupSize, runtime.NumCPU()).Get(); ok {
+		args = append(
+			args,
+			"-d", fmt.Sprintf("concurrency=%d", concurrency),
+			"-l", fmt.Sprintf("concurrency=%d", concurrency),
+		)
 	}
 
 	if opts.SourceDirectory != "" {
@@ -111,7 +153,7 @@ func XFS(ctx context.Context, partname string, setters ...Option) error {
 
 	opts.Printf("creating xfs filesystem on %s with args: %v", partname, args)
 
-	_, err := cmd.RunContext(ctx, "mkfs.xfs", args...)
+	_, err := cmd.RunWithOptions(ctx, "mkfs.xfs", args)
 
 	return err
 }

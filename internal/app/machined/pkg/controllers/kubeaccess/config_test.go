@@ -10,7 +10,6 @@ import (
 
 	"github.com/cosi-project/runtime/pkg/resource"
 	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 
@@ -32,8 +31,8 @@ func (suite *ConfigSuite) TestReconcileConfig() {
 		MachineConfig: &v1alpha1.MachineConfig{
 			MachineType: "controlplane",
 			MachineFeatures: &v1alpha1.FeaturesConfig{
-				KubernetesTalosAPIAccessConfig: &v1alpha1.KubernetesTalosAPIAccessConfig{
-					AccessEnabled:                     pointer.To(true),
+				KubernetesTalosAPIAccessConfig: &v1alpha1.KubernetesTalosAPIAccessConfig{ //nolint:staticcheck // legacy config
+					AccessEnabled:                     new(true),
 					AccessAllowedRoles:                []string{"os:admin"},
 					AccessAllowedKubernetesNamespaces: []string{"kube-system"},
 				},
@@ -77,8 +76,8 @@ func (suite *ConfigSuite) TestReconcileWorker() {
 		MachineConfig: &v1alpha1.MachineConfig{
 			MachineType: "worker",
 			MachineFeatures: &v1alpha1.FeaturesConfig{
-				KubernetesTalosAPIAccessConfig: &v1alpha1.KubernetesTalosAPIAccessConfig{
-					AccessEnabled:                     pointer.To(true),
+				KubernetesTalosAPIAccessConfig: &v1alpha1.KubernetesTalosAPIAccessConfig{ //nolint:staticcheck // legacy config
+					AccessEnabled:                     new(true),
 					AccessAllowedRoles:                []string{"os:admin"},
 					AccessAllowedKubernetesNamespaces: []string{"kube-system"},
 				},

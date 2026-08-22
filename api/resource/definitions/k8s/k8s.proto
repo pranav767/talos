@@ -17,11 +17,14 @@ message APIServerConfigSpec {
   repeated string etcd_servers = 4;
   int64 local_port = 5;
   repeated string service_cid_rs = 6;
-  map<string, string> extra_args = 7;
   repeated ExtraVolume extra_volumes = 8;
   map<string, string> environment_variables = 9;
   string advertised_address = 11;
   Resources resources = 12;
+  map<string, ArgValues> extra_args = 13;
+  bool startup_probes_enabled = 14;
+  bool use_authentication_config = 15;
+  repeated string args = 16;
 }
 
 // AdmissionControlConfigSpec is configuration for kube-apiserver.
@@ -35,8 +38,18 @@ message AdmissionPluginSpec {
   google.protobuf.Struct configuration = 2;
 }
 
+// ArgValues represents values for a command line argument which can be specified multiple times.
+message ArgValues {
+  repeated string values = 1;
+}
+
 // AuditPolicyConfigSpec is audit policy configuration for kube-apiserver.
 message AuditPolicyConfigSpec {
+  google.protobuf.Struct config = 1;
+}
+
+// AuthenticationConfigSpec is authentication configuration for kube-apiserver.
+message AuthenticationConfigSpec {
   google.protobuf.Struct config = 1;
 }
 
@@ -72,6 +85,17 @@ message BootstrapManifestsConfigSpec {
   repeated string flannel_extra_args = 16;
   string flannel_kube_service_host = 17;
   string flannel_kube_service_port = 18;
+  bool flannel_kube_network_policies_enabled = 19;
+  string flannel_kube_network_policies_image = 20;
+  string cni_name = 21;
+  uint32 flannel_backend_mtu = 22;
+  string flannel_backend_type = 23;
+  uint32 flannel_backend_port = 24;
+  Resources flannel_resources = 25;
+  google.protobuf.Struct flannel_backend_extra_config = 26;
+  google.protobuf.Struct proxy_config = 27;
+  Resources proxy_resources = 28;
+  string proxy_config_checksum = 29;
 }
 
 // ConfigStatusSpec describes status of rendered secrets.
@@ -87,15 +111,24 @@ message ControllerManagerConfigSpec {
   string cloud_provider = 3;
   repeated string pod_cid_rs = 4;
   repeated string service_cid_rs = 5;
-  map<string, string> extra_args = 6;
   repeated ExtraVolume extra_volumes = 7;
   map<string, string> environment_variables = 8;
   Resources resources = 9;
+  map<string, ArgValues> extra_args = 10;
+  repeated string args = 11;
+  int64 node_cidr_mask_size_i_pv4 = 12;
+  int64 node_cidr_mask_size_i_pv6 = 13;
 }
 
-// EndpointSpec describes status of rendered secrets.
+// EndpointSpec describes a list of endpoints to connect to.
 message EndpointSpec {
   repeated common.NetIP addresses = 1;
+  repeated string hosts = 2;
+}
+
+// EtcdEncryptionConfigSpec describes root Kubernetes secrets.
+message EtcdEncryptionConfigSpec {
+  string configuration = 1;
 }
 
 // ExtraManifest defines a single extra manifest to download.
@@ -149,7 +182,6 @@ message KubeletConfigSpec {
   string image = 1;
   repeated string cluster_dns = 2;
   string cluster_domain = 3;
-  map<string, string> extra_args = 4;
   repeated talos.resource.definitions.proto.Mount extra_mounts = 5;
   google.protobuf.Struct extra_config = 6;
   bool cloud_provider_external = 7;
@@ -159,7 +191,16 @@ message KubeletConfigSpec {
   bool disable_manifests_directory = 11;
   bool enable_fs_quota_monitoring = 12;
   google.protobuf.Struct credential_provider_config = 13;
-  bool allow_scheduling_on_control_plane = 14;
+  map<string, ArgValues> extra_args = 15;
+  map<string, string> register_with_taints = 16;
+}
+
+// KubeletKubeconfigSpec describes the current kubelet kubeconfig file.
+message KubeletKubeconfigSpec {
+  // Hash is a content digest of the kubeconfig file. It changes whenever the
+  // file contents change, which is the signal consumers use to rebuild their
+  // Kubernetes clients.
+  string hash = 1;
 }
 
 // KubeletSpecSpec holds the source of kubelet configuration.
@@ -170,6 +211,12 @@ message KubeletSpecSpec {
   string expected_nodename = 4;
   google.protobuf.Struct config = 5;
   google.protobuf.Struct credential_provider_config = 6;
+}
+
+// KubeletStatusSpec describes the current kubelet state.
+message KubeletStatusSpec {
+  // Image is the kubelet image reference.
+  string image = 1;
 }
 
 // ManifestSpec holds the Kubernetes resources spec.
@@ -212,6 +259,7 @@ message NodeStatusSpec {
   bool unschedulable = 3;
   map<string, string> labels = 4;
   map<string, string> annotations = 5;
+  repeated common.NetIPPrefix pod_cid_rs = 6;
 }
 
 // NodeTaintSpecSpec represents a label that's attached to a Talos node.
@@ -238,11 +286,12 @@ message Resources {
 message SchedulerConfigSpec {
   bool enabled = 1;
   string image = 2;
-  map<string, string> extra_args = 3;
   repeated ExtraVolume extra_volumes = 4;
   map<string, string> environment_variables = 5;
   Resources resources = 6;
   google.protobuf.Struct config = 7;
+  map<string, ArgValues> extra_args = 8;
+  repeated string args = 9;
 }
 
 // SecretsStatusSpec describes status of rendered secrets.

@@ -7,6 +7,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"net/netip"
 
 	"github.com/cosi-project/runtime/pkg/controller"
 	"github.com/cosi-project/runtime/pkg/resource"
@@ -14,7 +15,7 @@ import (
 	"github.com/cosi-project/runtime/pkg/state"
 	"github.com/siderolabs/gen/optional"
 	"go.uber.org/zap"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/k8s/internal/nodewatch"
@@ -44,6 +45,12 @@ func (ctrl *NodeStatusController) Inputs() []controller.Input {
 			ID:        optional.Some(k8s.NodenameID),
 			Kind:      controller.InputWeak,
 		},
+		{
+			Namespace: k8s.NamespaceName,
+			Type:      k8s.KubeletKubeconfigType,
+			ID:        optional.Some(k8s.KubeletKubeconfigID),
+			Kind:      controller.InputWeak,
+		},
 	}
 }
 
@@ -62,14 +69,15 @@ func (ctrl *NodeStatusController) Outputs() []controller.Output {
 //nolint:gocyclo,cyclop
 func (ctrl *NodeStatusController) Run(ctx context.Context, r controller.Runtime, logger *zap.Logger) error {
 	var (
-		kubernetesClient *kubernetes.Client
-		nodewatcher      *nodewatch.NodeWatcher
-		watchCtxCancel   context.CancelFunc
-		notifyCh         <-chan struct{}
-		watchErrCh       <-chan error
-		notifyCloser     func()
-		watchErrors      int
-		watchReady       bool
+		kubernetesClient     *kubernetes.Client
+		nodewatcher          *nodewatch.NodeWatcher
+		watchCtxCancel       context.CancelFunc
+		notifyCh             <-chan struct{}
+		watchErrCh           <-chan error
+		notifyCloser         func()
+		watchErrors          int
+		watchReady           bool
+		watcherKubeconfigVer string
 	)
 
 	closeWatcher := func() {
@@ -94,6 +102,7 @@ func (ctrl *NodeStatusController) Run(ctx context.Context, r controller.Runtime,
 		watchErrors = 0
 		watchReady = false
 		nodewatcher = nil
+		watcherKubeconfigVer = ""
 	}
 
 	defer closeWatcher()
@@ -139,8 +148,35 @@ func (ctrl *NodeStatusController) Run(ctx context.Context, r controller.Runtime,
 			return err
 		}
 
+		// Look up the current kubelet kubeconfig hash. If it is not yet published,
+		// the kubeconfig was read by WaitForKubeconfigReady but the
+		// KubeletKubeconfigController hasn't written its resource yet — wait for it
+		// so we never bind a watcher to a hash we haven't recorded.
+		kubeconfigRes, err := safe.ReaderGetByID[*k8s.KubeletKubeconfig](ctx, r, k8s.KubeletKubeconfigID)
+		if err != nil {
+			if !state.IsNotFoundError(err) {
+				return fmt.Errorf("error getting kubelet kubeconfig: %w", err)
+			}
+
+			continue
+		}
+
+		currentKubeconfigVer := kubeconfigRes.TypedSpec().Hash
+
 		if nodewatcher != nil && nodewatcher.Nodename() != nodename.TypedSpec().Nodename {
 			// nodename changed, so we need to reinitialize the watcher
+			closeWatcher()
+		}
+
+		if nodewatcher != nil && watcherKubeconfigVer != currentKubeconfigVer {
+			// kubelet kubeconfig on disk changed — the cached client may be pinned
+			// to a stale endpoint, so rebuild the watcher with a fresh client.
+			logger.Info(
+				"kubelet kubeconfig changed, restarting node watcher",
+				zap.String("old_hash", watcherKubeconfigVer),
+				zap.String("new_hash", currentKubeconfigVer),
+			)
+
 			closeWatcher()
 		}
 
@@ -164,6 +200,8 @@ func (ctrl *NodeStatusController) Run(ctx context.Context, r controller.Runtime,
 			if err != nil {
 				return fmt.Errorf("error setting up node watcher: %w", err) //nolint:govet
 			}
+
+			watcherKubeconfigVer = currentKubeconfigVer
 		}
 
 		if !watchReady {
@@ -179,17 +217,31 @@ func (ctrl *NodeStatusController) Run(ctx context.Context, r controller.Runtime,
 		}
 
 		if node != nil {
-			if err = safe.WriterModify(ctx, r, k8s.NewNodeStatus(k8s.NamespaceName, node.Name),
+			podCIDRs := make([]netip.Prefix, 0, len(node.Spec.PodCIDRs))
+			for _, cidr := range node.Spec.PodCIDRs {
+				prefix, err := netip.ParsePrefix(cidr)
+				if err != nil {
+					logger.Warn("error parsing pod CIDR", zap.String("cidr", cidr), zap.Error(err))
+
+					continue
+				}
+
+				podCIDRs = append(podCIDRs, prefix)
+			}
+
+			if err = safe.WriterModify(
+				ctx, r, k8s.NewNodeStatus(k8s.NamespaceName, node.Name),
 				func(res *k8s.NodeStatus) error {
 					res.TypedSpec().Nodename = node.Name
 					res.TypedSpec().Unschedulable = node.Spec.Unschedulable
 					res.TypedSpec().Labels = node.Labels
 					res.TypedSpec().Annotations = node.Annotations
 					res.TypedSpec().NodeReady = false
+					res.TypedSpec().PodCIDRs = podCIDRs
 
 					for _, condition := range node.Status.Conditions {
-						if condition.Type == v1.NodeReady {
-							res.TypedSpec().NodeReady = condition.Status == v1.ConditionTrue
+						if condition.Type == corev1.NodeReady {
+							res.TypedSpec().NodeReady = condition.Status == corev1.ConditionTrue
 						}
 					}
 

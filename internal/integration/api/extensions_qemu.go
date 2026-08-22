@@ -8,7 +8,6 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -22,7 +21,6 @@ import (
 	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
 	"github.com/cosi-project/runtime/pkg/safe"
 	"github.com/cosi-project/runtime/pkg/state"
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	nodev1 "k8s.io/api/node/v1"
@@ -32,6 +30,7 @@ import (
 	"github.com/siderolabs/talos/cmd/talosctl/pkg/talos/helpers"
 	"github.com/siderolabs/talos/internal/integration/base"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
+	"github.com/siderolabs/talos/pkg/machinery/api/storage"
 	"github.com/siderolabs/talos/pkg/machinery/client"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"github.com/siderolabs/talos/pkg/machinery/resources/block"
@@ -103,40 +102,39 @@ func (suite *ExtensionsSuiteQEMU) TestExtensionsExpectedPaths() {
 
 // TestExtensionsExpectedModules verifies expected modules are loaded and in modules.dep.
 func (suite *ExtensionsSuiteQEMU) TestExtensionsExpectedModules() {
-	// expectedModulesModDep is a map of module name to module.dep name
-	expectedModulesModDep := map[string]string{
-		"asix":            "asix.ko",
-		"ax88179_178a":    "ax88179_178a.ko",
-		"ax88796b":        "ax88796b.ko",
-		"binfmt_misc":     "binfmt_misc.ko",
-		"btrfs":           "btrfs.ko",
-		"cdc_ether":       "cdc_ether.ko",
-		"cdc_mbim":        "cdc_mbim.ko",
-		"cdc_ncm":         "cdc_ncm.ko",
-		"cdc_subset":      "cdc_subset.ko",
-		"cdc_wdm":         "cdc-wdm.ko",
-		"cxgb":            "cxgb.ko",
-		"cxgb3":           "cxgb3.ko",
-		"cxgb4":           "cxgb4.ko",
-		"cxgb4vf":         "cxgb4vf.ko",
-		"drbd":            "drbd.ko",
-		"ena":             "ena.ko",
-		"gasket":          "gasket.ko",
-		"net1080":         "net1080.ko",
-		"option":          "option.ko",
-		"qmi_wwan":        "qmi_wwan.ko",
-		"r8153_ecm":       "r8153_ecm.ko",
-		"thunderbolt":     "thunderbolt.ko",
-		"thunderbolt_net": "thunderbolt_net.ko",
-		"usb_wwan":        "usb_wwan.ko",
-		"usbnet":          "usbnet.ko",
-		"xdma":            "xdma.ko",
-		"zaurus":          "zaurus.ko",
-		"zfs":             "zfs.ko",
+	expectedModules := []string{
+		"asix",
+		"ax88179_178a",
+		"ax88796b",
+		"binfmt_misc",
+		"btrfs",
+		"cdc_ether",
+		"cdc_mbim",
+		"cdc_ncm",
+		"cdc_subset",
+		"cdc_wdm",
+		"cxgb",
+		"cxgb3",
+		"cxgb4",
+		"cxgb4vf",
+		"drbd",
+		"ena",
+		"gasket",
+		"net1080",
+		"option",
+		"qmi_wwan",
+		"r8153_ecm",
+		"thunderbolt",
+		"thunderbolt_net",
+		"usb_wwan",
+		"usbnet",
+		"xdma",
+		"zaurus",
+		"zfs",
 	}
 
 	node := suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker)
-	suite.AssertExpectedModules(suite.ctx, node, expectedModulesModDep)
+	suite.AssertExpectedModules(suite.ctx, node, expectedModules)
 }
 
 // TestExtensionsNutClient verifies nut client is working.
@@ -240,9 +238,19 @@ func (suite *ExtensionsSuiteQEMU) TestExtensionsCrun() {
 	suite.testRuntimeClass("crun", "crun")
 }
 
-// TestExtensionsKataContainers verifies gvisor runtime class is working.
+// TestExtensionsKataContainers verifies that Kata Containers Cloud Hypervisor runtime class is working.
 func (suite *ExtensionsSuiteQEMU) TestExtensionsKataContainers() {
 	suite.testRuntimeClass("kata", "kata")
+}
+
+// TestExtensionsKataContainersQEMU verifies that Kata Containers QEMU runtime class is working.
+func (suite *ExtensionsSuiteQEMU) TestExtensionsKataContainersQEMU() {
+	suite.testRuntimeClass("kata-qemu", "kata-qemu")
+}
+
+// TestExtensionsKataContainersSNP verifies that Kata Containers confidential VMs runtime class is working.
+func (suite *ExtensionsSuiteQEMU) TestExtensionsKataContainersSNP() {
+	suite.testRuntimeClass("kata-qemu-coco-dev", "kata-qemu-coco-dev")
 }
 
 // TestExtensionsYouki verifies youki runtime class is working.
@@ -273,7 +281,7 @@ func (suite *ExtensionsSuiteQEMU) testRuntimeClass(runtimeClassName, handlerName
 			Name: testName,
 		},
 		Spec: corev1.PodSpec{
-			RuntimeClassName: pointer.To(runtimeClassName),
+			RuntimeClassName: new(runtimeClassName),
 			Containers: []corev1.Container{
 				{
 					Name:  testName,
@@ -314,87 +322,6 @@ func (suite *ExtensionsSuiteQEMU) TestExtensionsStargz() {
 	suite.Require().NoError(suite.WaitForPodToBeRunning(suite.ctx, 5*time.Minute, "default", "stargz-hello"))
 }
 
-// TestExtensionsMdADM verifies mdadm is working, udev rules work and the raid is mounted on reboot.
-func (suite *ExtensionsSuiteQEMU) TestExtensionsMdADM() {
-	node := suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker)
-
-	userDisks := suite.UserDisks(suite.ctx, node)
-
-	suite.Require().GreaterOrEqual(len(userDisks), 2, "expected at least two user disks to be available")
-
-	userDisksJoined := strings.Join(userDisks[:2], " ")
-
-	mdAdmCreatePodDef, err := suite.NewPrivilegedPod("mdadm-create")
-	suite.Require().NoError(err)
-
-	suite.Require().NoError(mdAdmCreatePodDef.Create(suite.ctx, 5*time.Minute))
-
-	defer mdAdmCreatePodDef.Delete(suite.ctx) //nolint:errcheck
-
-	stdout, _, err := mdAdmCreatePodDef.Exec(
-		suite.ctx,
-		fmt.Sprintf("nsenter --mount=/proc/1/ns/mnt -- mdadm --create /dev/md/testmd --raid-devices=2 --metadata=1.2 --level=1 %s", userDisksJoined),
-	)
-	suite.Require().NoError(err)
-
-	suite.Require().Contains(stdout, "mdadm: array /dev/md/testmd started.")
-
-	defer func() {
-		hostNameStatus, err := safe.StateGetByID[*network.HostnameStatus](client.WithNode(suite.ctx, node), suite.Client.COSI, "hostname")
-		suite.Require().NoError(err)
-
-		hostname := hostNameStatus.TypedSpec().Hostname
-
-		deletePodDef, err := suite.NewPrivilegedPod("mdadm-destroy")
-		suite.Require().NoError(err)
-
-		suite.Require().NoError(deletePodDef.Create(suite.ctx, 5*time.Minute))
-
-		defer deletePodDef.Delete(suite.ctx) //nolint:errcheck
-
-		if _, _, err := deletePodDef.Exec(
-			suite.ctx,
-			fmt.Sprintf("nsenter --mount=/proc/1/ns/mnt -- mdadm --wait --stop /dev/md/%s:testmd", hostname),
-		); err != nil {
-			suite.T().Logf("failed to stop mdadm array: %v", err)
-		}
-
-		if _, _, err := deletePodDef.Exec(
-			suite.ctx,
-			fmt.Sprintf("nsenter --mount=/proc/1/ns/mnt -- mdadm --zero-superblock %s", userDisksJoined),
-		); err != nil {
-			suite.T().Logf("failed to remove md array backed by volumes %s: %v", userDisksJoined, err)
-		}
-	}()
-
-	// now we want to reboot the node and make sure the array is still mounted
-	suite.AssertRebooted(
-		suite.ctx, node, func(nodeCtx context.Context) error {
-			return base.IgnoreGRPCUnavailable(suite.Client.Reboot(nodeCtx))
-		}, 5*time.Minute,
-		suite.CleanupFailedPods,
-	)
-
-	suite.Require().True(suite.mdADMArrayExists(), "expected mdadm array to be present")
-}
-
-func (suite *ExtensionsSuiteQEMU) mdADMArrayExists() bool {
-	node := suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker)
-
-	ctx := client.WithNode(suite.ctx, node)
-
-	disks, err := safe.StateListAll[*block.Disk](ctx, suite.Client.COSI)
-	suite.Require().NoError(err)
-
-	for disk := range disks.All() {
-		if strings.HasPrefix(disk.TypedSpec().DevPath, "/dev/md") {
-			return true
-		}
-	}
-
-	return false
-}
-
 // TestExtensionsZFS verifies zfs is working, udev rules work and the pool is mounted on reboot.
 func (suite *ExtensionsSuiteQEMU) TestExtensionsZFS() {
 	node := suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker)
@@ -404,114 +331,102 @@ func (suite *ExtensionsSuiteQEMU) TestExtensionsZFS() {
 
 	suite.Require().NotEmpty(userDisks, "expected at least one user disks to be available")
 
-	zfsPodDef, err := suite.NewPrivilegedPod("zpool-create")
-	suite.Require().NoError(err)
-
-	suite.Require().NoError(zfsPodDef.Create(suite.ctx, 5*time.Minute))
-
-	defer zfsPodDef.Delete(suite.ctx) //nolint:errcheck
-
-	stdout, stderr, err := zfsPodDef.Exec(
-		suite.ctx,
-		fmt.Sprintf("nsenter --mount=/proc/1/ns/mnt -- zpool create -m /var/tank tank %s", userDisks[0]),
+	stdout, exitCode, err := suite.RunDebugContainer(suite.ctx, node,
+		"zpool", "create", "-m", "/var/tank", "tank", userDisks[0],
 	)
 	suite.Require().NoError(err)
-
-	suite.Require().Equal("", stderr)
+	suite.Require().EqualValues(0, exitCode, "zpool create failed: %s", stdout)
 	suite.Require().Equal("", stdout)
 
-	stdout, stderr, err = zfsPodDef.Exec(
-		suite.ctx,
-		"nsenter --mount=/proc/1/ns/mnt -- zfs create -V 1gb tank/vol",
+	stdout, exitCode, err = suite.RunDebugContainer(suite.ctx, node,
+		"zfs", "create", "-V", "1gb", "tank/vol",
 	)
 	suite.Require().NoError(err)
-
-	suite.Require().Equal("", stderr)
+	suite.Require().EqualValues(0, exitCode, "zfs create failed: %s", stdout)
 	suite.Require().Equal("", stdout)
 
 	defer func() {
-		deletePodDef, err := suite.NewPrivilegedPod("zpool-destroy")
-		suite.Require().NoError(err)
-
-		suite.Require().NoError(deletePodDef.Create(suite.ctx, 5*time.Minute))
-
-		defer deletePodDef.Delete(suite.ctx) //nolint:errcheck
-
-		if _, _, err := deletePodDef.Exec(
-			suite.ctx,
-			"nsenter --mount=/proc/1/ns/mnt -- zfs destroy tank/vol",
-		); err != nil {
+		if _, _, err := suite.RunDebugContainer(suite.ctx, node, "zfs", "destroy", "tank/vol"); err != nil {
 			suite.T().Logf("failed to remove zfs dataset tank/vol: %v", err)
 		}
 
-		if _, _, err := deletePodDef.Exec(
-			suite.ctx,
-			"nsenter --mount=/proc/1/ns/mnt -- zpool destroy tank",
-		); err != nil {
+		if _, _, err := suite.RunDebugContainer(suite.ctx, node, "zpool", "destroy", "tank"); err != nil {
 			suite.T().Logf("failed to remove zpool tank: %v", err)
+		}
+
+		// Wipe the disk so no zfs label lingers (otherwise the pool is re-discovered
+		// as a volume after the test).
+		if err := suite.Client.BlockDeviceWipe(client.WithNode(suite.ctx, node), &storage.BlockDeviceWipeRequest{
+			Devices: []*storage.BlockDeviceWipeDescriptor{{Device: filepath.Base(userDisks[0])}},
+		}); err != nil {
+			suite.T().Logf("failed to wipe disk %s: %v", userDisks[0], err)
 		}
 	}()
 
-	suite.Require().True(suite.checkZFSPoolMounted(), "expected zfs pool to be mounted")
+	suite.EventuallyWithT(func(t *assert.CollectT) {
+		suite.checkZFSPoolMounted(t, node)
+	}, 2*time.Minute, time.Second, "expected zfs pool to be mounted")
 
 	// now we want to reboot the node and make sure the pool is still mounted
 	suite.AssertRebooted(
 		suite.ctx, node, func(nodeCtx context.Context) error {
 			return base.IgnoreGRPCUnavailable(suite.Client.Reboot(nodeCtx))
 		}, 5*time.Minute,
-		suite.CleanupFailedPods,
 	)
 
-	suite.Require().True(suite.checkZFSPoolMounted(), "expected zfs pool to be mounted")
+	suite.EventuallyWithT(func(t *assert.CollectT) {
+		suite.checkZFSPoolMounted(t, node)
+	}, 30*time.Second, time.Second, "expected zfs pool to be mounted after reboot")
 }
 
-func (suite *ExtensionsSuiteQEMU) checkZFSPoolMounted() bool {
-	node := suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker)
-
+func (suite *ExtensionsSuiteQEMU) checkZFSPoolMounted(t *assert.CollectT, node string) {
 	ctx := client.WithNode(suite.ctx, node)
 
 	stream, err := suite.Client.LS(ctx, &machineapi.ListRequest{
-		Root:  "/dev/zvol/tank/vol",
-		Types: []machineapi.ListRequest_Type{machineapi.ListRequest_REGULAR},
+		Root:  "/dev/zvol/tank/",
+		Types: []machineapi.ListRequest_Type{machineapi.ListRequest_SYMLINK},
 	})
+	if !assert.NoError(t, err, "LS /dev/zvol/tank/") {
+		return
+	}
 
-	suite.Require().NoError(err)
+	found := false
 
-	suite.Require().NoError(helpers.ReadGRPCStream(stream, func(info *machineapi.FileInfo, node string, multipleNodes bool) error {
-		suite.Require().Equal("/dev/zvol/tank/vol", info.Name, "expected /dev/zvol/tank/vol to exist")
-		suite.Require().Equal("zd0", info.Link, "expected /dev/zvol/tank/vol to be linked to zd0")
+	if !assert.NoError(t, helpers.ReadGRPCStream(stream, func(info *machineapi.FileInfo, node string, multipleNodes bool) error {
+		if info.Name == "/dev/zvol/tank/vol" && strings.HasPrefix(filepath.Base(info.Link), "zd") {
+			found = true
+		}
 
 		return nil
-	}))
+	}), "reading LS stream") {
+		return
+	}
+
+	assert.True(t, found, "expected /dev/zvol/tank/vol symlink pointing to a zd* device")
 
 	disks, err := safe.StateListAll[*block.Disk](ctx, suite.Client.COSI)
-	suite.Require().NoError(err)
+	if !assert.NoError(t, err, "StateListAll disks") {
+		return
+	}
 
 	for disk := range disks.All() {
 		if strings.HasPrefix(disk.TypedSpec().DevPath, "/dev/zd") {
-			return true
+			return
 		}
 	}
 
-	return false
+	assert.Fail(t, "no /dev/zd* disk found in block resources")
 }
 
 // TestExtensionsUtilLinuxTools verifies util-linux-tools are working.
 func (suite *ExtensionsSuiteQEMU) TestExtensionsUtilLinuxTools() {
-	utilLinuxPodDef, err := suite.NewPrivilegedPod("util-linux-tools-test")
-	suite.Require().NoError(err)
+	node := suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker)
 
-	suite.Require().NoError(utilLinuxPodDef.Create(suite.ctx, 5*time.Minute))
-
-	defer utilLinuxPodDef.Delete(suite.ctx) //nolint:errcheck
-
-	stdout, stderr, err := utilLinuxPodDef.Exec(
-		suite.ctx,
-		"nsenter --mount=/proc/1/ns/mnt -- /usr/local/sbin/fstrim --version",
+	stdout, exitCode, err := suite.RunDebugContainer(suite.ctx, node,
+		"/usr/local/sbin/fstrim", "--version",
 	)
 	suite.Require().NoError(err)
-
-	suite.Require().Equal("", stderr)
+	suite.Require().EqualValues(0, exitCode, "fstrim --version failed: %s", stdout)
 	suite.Require().Contains(stdout, "fstrim from util-linux")
 }
 
@@ -572,7 +487,7 @@ func (suite *ExtensionsSuiteQEMU) TestExtensionsSpin() {
 					Command: []string{"/"},
 				},
 			},
-			RuntimeClassName: pointer.To("wasmtime-spin-v2"),
+			RuntimeClassName: new("wasmtime-spin-v2"),
 		},
 	}, metav1.CreateOptions{})
 	defer suite.Clientset.CoreV1().Pods("default").Delete(suite.ctx, "spin-test", metav1.DeleteOptions{}) //nolint:errcheck
@@ -590,13 +505,14 @@ func (suite *ExtensionsSuiteQEMU) TestLoadedKernelModule() {
 
 	suite.T().Logf("using node %s", node)
 
-	rtestutils.AssertResources(ctx, suite.T(), suite.Client.COSI, []resource.ID{
-		"virtio_balloon",
-		"virtio_pci",
-		"virtio_pci_legacy_dev",
-		"virtio_pci_modern_dev",
-	},
-		func(res *runtime.LoadedKernelModule, asrt *assert.Assertions) {
+	rtestutils.AssertResources(
+		ctx, suite.T(), suite.Client.COSI, []resource.ID{
+			"virtio_balloon",
+			"virtio_pci",
+			"virtio_pci_legacy_dev",
+			"virtio_pci_modern_dev",
+		},
+		func(res *runtime.LoadedKernelModule, asrt *assert.Assertions) { //nolint:staticcheck
 			asrt.NotEmpty(res.TypedSpec().Size, "kernel module size should not be empty")
 			asrt.NotEmpty(res.TypedSpec().Address, "kernel module address should not be empty")
 			asrt.GreaterOrEqual(res.TypedSpec().ReferenceCount, 0, "kernel module instances should be non-negative")

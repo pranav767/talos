@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-//nolint:scopelint,testpackage
+//nolint:testpackage
 package v1alpha1
 
 import (
@@ -66,6 +66,10 @@ func (m *mockSequencer) MaintenanceUpgrade(r runtime.Runtime, req *machine.Upgra
 
 func (m *mockSequencer) Upgrade(r runtime.Runtime, req *machine.UpgradeRequest) []runtime.Phase {
 	return m.phases[runtime.SequenceUpgrade]
+}
+
+func (m *mockSequencer) EmergencyVolumeCleanup(r runtime.Runtime) []runtime.Phase {
+	return m.phases[runtime.SequenceEmergencyVolumeCleanup]
 }
 
 func (m *mockSequencer) trackCall(name string, doneCh chan struct{}) func(runtime.Sequence, any) (runtime.TaskExecutionFunc, string) {

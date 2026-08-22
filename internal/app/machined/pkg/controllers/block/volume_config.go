@@ -92,6 +92,21 @@ func (ctrl *VolumeConfigController) Run(ctx context.Context, r controller.Runtim
 			return nil
 		}
 
+		// create a volume mount request for the root user volume mount point
+		// to keep it alive and prevent it from being torn down
+		if err := safe.WriterModify(
+			ctx, r,
+			block.NewVolumeMountRequest(block.NamespaceName, constants.UserVolumeMountPoint),
+			func(v *block.VolumeMountRequest) error {
+				v.TypedSpec().Requester = ctrl.Name()
+				v.TypedSpec().VolumeID = constants.UserVolumeMountPoint
+
+				return nil
+			},
+		); err != nil {
+			return fmt.Errorf("error creating volume mount request for user volume mount point: %w", err)
+		}
+
 		machineCfg, encryptionMeta, err := ctrl.loadConfiguration(ctx, r)
 		if err != nil {
 			return err
@@ -106,18 +121,9 @@ func (ctrl *VolumeConfigController) Run(ctx context.Context, r controller.Runtim
 			return err
 		}
 
-		transformers := append(volumeconfig.GetSystemVolumeTransformers(ctx, encryptionMeta,
-			ctrl.V1Alpha1Mode.InContainer(), ctrl.V1Alpha1Mode.IsAgent()), volumeconfig.UserVolumeTransformers...)
-
-		var resources []volumeconfig.VolumeResource
-
-		for _, transformer := range transformers {
-			r, err := transformer(cfg)
-			if err != nil {
-				return err
-			}
-
-			resources = append(resources, r...)
+		resources, err := volumeconfig.BuildVolumeResources(ctx, cfg, encryptionMeta, ctrl.V1Alpha1Mode.InContainer(), ctrl.V1Alpha1Mode.IsAgent())
+		if err != nil {
+			return err
 		}
 
 		volumeConfigsByID, volumeMountRequestsByID, err := ctrl.getExistingVolumes(ctx, r)
@@ -162,7 +168,7 @@ func (ctrl *VolumeConfigController) setupStateEncryption(ctx context.Context, l 
 
 	ok, err = ctrl.MetaProvider.Meta().SetTagBytes(ctx, meta.StateEncryptionConfig, metaEncryptionConfig)
 	if err != nil {
-		return fmt.Errorf("error setting meta tag %q: %w", meta.StateEncryptionConfig, err)
+		return fmt.Errorf("error setting meta tag %d: %w", meta.StateEncryptionConfig, err)
 	}
 
 	if !ok {

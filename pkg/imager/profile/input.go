@@ -27,6 +27,7 @@ import (
 	"github.com/siderolabs/talos/pkg/imager/profile/internal/signer/aws"
 	"github.com/siderolabs/talos/pkg/imager/profile/internal/signer/azure"
 	"github.com/siderolabs/talos/pkg/imager/profile/internal/signer/file"
+	"github.com/siderolabs/talos/pkg/imager/profile/internal/signer/signerd"
 	"github.com/siderolabs/talos/pkg/images"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"github.com/siderolabs/talos/pkg/machinery/imager/quirks"
@@ -111,11 +112,14 @@ type SigningKeyAndCertificate struct {
 	AzureCertificateID string `yaml:"azureCertificateID,omitempty"`
 	// AWS.
 	//
-	// AWS KMS Key ID and region.
-	// AWS doesn't have a good way to store a certificate, so it's expected to be a file.
+	// AWS KMS Key ID, ACM certificate ARN, and region.
+	// Support local cert file for legacy use cases.
 	AwsKMSKeyID string `yaml:"awsKMSKeyID,omitempty"`
 	AwsRegion   string `yaml:"awsRegion,omitempty"`
 	AwsCertPath string `yaml:"awsCertPath,omitempty"`
+	AwsCertARN  string `yaml:"awsCertARN,omitempty"`
+	// SignerAddress is a gRPC unix:// address of a SignerService.
+	SignerAddress string `yaml:"signerAddress,omitempty"`
 }
 
 // SigningKey describes a signing key.
@@ -136,11 +140,27 @@ type SigningKey struct {
 	// AWS KMS Key ID and region.
 	AwsKMSKeyID string `yaml:"awsKMSKeyID,omitempty"`
 	AwsRegion   string `yaml:"awsRegion,omitempty"`
+	// SignerAddress is a gRPC unix:// address of a SignerService.
+	SignerAddress string `yaml:"signerAddress,omitempty"`
+}
+
+// PCRSigner signs PCR measurements and releases any associated resources.
+type PCRSigner interface {
+	measure.RSAKey
+	io.Closer
+}
+
+// SecureBootSigner signs SecureBoot assets and releases any associated resources.
+type SecureBootSigner interface {
+	pesign.CertificateSigner
+	io.Closer
 }
 
 // GetSigner returns the signer.
-func (key SigningKey) GetSigner(ctx context.Context) (measure.RSAKey, error) {
+func (key SigningKey) GetSigner(ctx context.Context) (PCRSigner, error) {
 	switch {
+	case key.SignerAddress != "":
+		return signerd.NewPCRSigner(ctx, key.SignerAddress)
 	case key.KeyPath != "":
 		return file.NewPCRSigner(key.KeyPath)
 	case key.AzureVaultURL != "" && key.AzureKeyID != "":
@@ -153,16 +173,20 @@ func (key SigningKey) GetSigner(ctx context.Context) (measure.RSAKey, error) {
 }
 
 // GetSigner returns the signer.
-func (keyAndCert SigningKeyAndCertificate) GetSigner(ctx context.Context) (pesign.CertificateSigner, error) {
+func (keyAndCert SigningKeyAndCertificate) GetSigner(ctx context.Context) (SecureBootSigner, error) {
 	switch {
+	case keyAndCert.SignerAddress != "":
+		return signerd.NewSecureBootSigner(ctx, keyAndCert.SignerAddress)
 	case keyAndCert.KeyPath != "" && keyAndCert.CertPath != "":
 		return file.NewSecureBootSigner(keyAndCert.CertPath, keyAndCert.KeyPath)
 	case keyAndCert.AzureVaultURL != "" && keyAndCert.AzureCertificateID != "":
-		return azure.NewSecureBootSigner(ctx, keyAndCert.AzureVaultURL, keyAndCert.AzureCertificateID, keyAndCert.AzureCertificateID)
+		return azure.NewSecureBootSigner(ctx, keyAndCert.AzureVaultURL, keyAndCert.AzureCertificateID, "")
+	case keyAndCert.AwsKMSKeyID != "" && keyAndCert.AwsCertARN != "":
+		return aws.NewSecureBootACMSigner(ctx, keyAndCert.AwsKMSKeyID, keyAndCert.AwsRegion, keyAndCert.AwsCertARN)
 	case keyAndCert.AwsKMSKeyID != "" && keyAndCert.AwsCertPath != "":
 		return aws.NewSecureBootSigner(ctx, keyAndCert.AwsKMSKeyID, keyAndCert.AwsRegion, keyAndCert.AwsCertPath)
 	default:
-		return nil, errors.New("unsupported PCR signer")
+		return nil, errors.New("unsupported SecureBoot signer")
 	}
 }
 
@@ -186,10 +210,10 @@ func (i *Input) FillDefaults(arch, version string, secureboot bool) {
 	}
 
 	if i.BaseInstaller == zeroContainerAsset {
-		i.BaseInstaller.ImageRef = fmt.Sprintf("%s:%s", images.DefaultInstallerImageRepository, version)
+		i.BaseInstaller.ImageRef = fmt.Sprintf("%s:%s", images.DefaultInstallerImageRepository, version) //nolint:staticcheck // required as a <1.11.0 fallback
 
 		if quirks.New(version).SupportsUnifiedInstaller() {
-			i.BaseInstaller.ImageRef = fmt.Sprintf("%s-base:%s", images.DefaultInstallerImageRepository, version)
+			i.BaseInstaller.ImageRef = fmt.Sprintf("%s:%s", images.DefaultInstallerBaseImageRepository, version)
 		}
 	}
 
@@ -317,7 +341,12 @@ func (c *ContainerAsset) pullFromOCI(arch string) (v1.Image, error) {
 }
 
 // Extract the container asset to the path.
-func (c *ContainerAsset) Extract(ctx context.Context, destination, arch string, printf func(string, ...any)) error {
+func (c *ContainerAsset) Extract(
+	ctx context.Context,
+	destination, arch string,
+	printf func(string, ...any),
+	xattrsMap map[string]string,
+) error {
 	if c.TarballPath != "" {
 		in, err := os.Open(c.TarballPath)
 		if err != nil {
@@ -328,7 +357,7 @@ func (c *ContainerAsset) Extract(ctx context.Context, destination, arch string, 
 
 		printf("extracting %s...", c.TarballPath)
 
-		return archiver.Untar(ctx, in, destination)
+		return archiver.Untar(ctx, in, destination, xattrsMap)
 	}
 
 	img, err := c.Pull(ctx, arch, printf)
@@ -353,7 +382,7 @@ func (c *ContainerAsset) Extract(ctx context.Context, destination, arch string, 
 	})
 
 	eg.Go(func() error {
-		if untarErr := archiver.Untar(ctx, r, destination); untarErr != nil {
+		if untarErr := archiver.Untar(ctx, r, destination, xattrsMap); untarErr != nil {
 			r.CloseWithError(untarErr)
 
 			return untarErr

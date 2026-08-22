@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -44,6 +45,7 @@ import (
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
+	"go.uber.org/zap"
 	"golang.org/x/net/bpf"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
@@ -51,10 +53,16 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
+	"github.com/siderolabs/talos/internal/app/debug"
+	"github.com/siderolabs/talos/internal/app/images"
+	"github.com/siderolabs/talos/internal/app/internal/machinehelper"
+	"github.com/siderolabs/talos/internal/app/lifecycle"
+	"github.com/siderolabs/talos/internal/app/lvmd"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/runtime"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/runtime/v1alpha1/bootloader"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/runtime/v1alpha1/bootloader/options"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/system"
+	"github.com/siderolabs/talos/internal/app/mdd"
 	"github.com/siderolabs/talos/internal/app/resources"
 	storaged "github.com/siderolabs/talos/internal/app/storaged"
 	"github.com/siderolabs/talos/internal/pkg/containers"
@@ -68,6 +76,7 @@ import (
 	"github.com/siderolabs/talos/pkg/archiver"
 	"github.com/siderolabs/talos/pkg/chunker"
 	"github.com/siderolabs/talos/pkg/chunker/stream"
+	"github.com/siderolabs/talos/pkg/grpc/middleware/authz"
 	"github.com/siderolabs/talos/pkg/kubeconfig"
 	"github.com/siderolabs/talos/pkg/machinery/api/cluster"
 	"github.com/siderolabs/talos/pkg/machinery/api/common"
@@ -77,6 +86,7 @@ import (
 	timeapi "github.com/siderolabs/talos/pkg/machinery/api/time"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/siderolabs/talos/pkg/machinery/config"
+	configconfig "github.com/siderolabs/talos/pkg/machinery/config/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/configdiff"
 	"github.com/siderolabs/talos/pkg/machinery/config/configloader"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
@@ -115,7 +125,12 @@ type Server struct {
 	// ShutdownCtx signals that the server is shutting down.
 	ShutdownCtx context.Context //nolint:containedctx
 
+	// Zap logger.
+	Logger *zap.Logger
+
 	server *grpc.Server
+
+	applyConfigMu sync.Mutex
 }
 
 func (s *Server) checkSupported(feature runtime.ModeCapability) error {
@@ -128,17 +143,6 @@ func (s *Server) checkSupported(feature runtime.ModeCapability) error {
 	return nil
 }
 
-func (s *Server) checkControlplane(apiName string) error {
-	switch s.Controller.Runtime().Config().Machine().Type() { //nolint:exhaustive
-	case machinetype.TypeControlPlane:
-		fallthrough
-	case machinetype.TypeInit:
-		return nil
-	}
-
-	return status.Errorf(codes.Unimplemented, "%s is only available on control plane nodes", apiName)
-}
-
 // Register implements the factory.Registrator interface.
 func (s *Server) Register(obj *grpc.Server) {
 	s.server = obj
@@ -148,10 +152,15 @@ func (s *Server) Register(obj *grpc.Server) {
 	resourceState = state.WrapCore(state.Filter(resourceState, resources.AccessPolicy(resourceState)))
 
 	machine.RegisterMachineServiceServer(obj, s)
+	machine.RegisterImageServiceServer(obj, images.NewService(s.Controller, s.Logger))
+	machine.RegisterDebugServiceServer(obj, &debug.Service{})
+	machine.RegisterLifecycleServiceServer(obj, lifecycle.NewService(s.Controller.Runtime(), s.Logger))
 	cluster.RegisterClusterServiceServer(obj, s)
 	cosiv1alpha1.RegisterStateServer(obj, server.NewState(resourceState))
 	inspect.RegisterInspectServiceServer(obj, &InspectServer{server: s})
 	storage.RegisterStorageServiceServer(obj, &storaged.Server{Controller: s.Controller})
+	machine.RegisterLVMServiceServer(obj, lvmd.NewService(s.Controller, s.Logger))
+	machine.RegisterMDServiceServer(obj, mdd.NewService(s.Controller, s.Logger))
 	timeapi.RegisterTimeServiceServer(obj, &TimeServer{ConfigProvider: s.Controller.Runtime()})
 }
 
@@ -170,9 +179,25 @@ func (m modeWrapper) RequiresInstall() bool {
 //
 //nolint:gocyclo,cyclop
 func (s *Server) ApplyConfiguration(ctx context.Context, in *machine.ApplyConfigurationRequest) (*machine.ApplyConfigurationResponse, error) {
+	if s.Controller.Runtime().State().Platform().Mode().IsAgent() {
+		return nil, status.Error(codes.Unimplemented, "API is not implemented in agent mode")
+	}
+
+	if !s.applyConfigMu.TryLock() {
+		return nil, status.Error(codes.FailedPrecondition, "another apply configuration is already in progress")
+	}
+	defer s.applyConfigMu.Unlock()
+
+	roles := authz.GetRoles(ctx)
+	inMaintenance := !s.Controller.Runtime().ConfigCompleteForBoot()
+
+	if !inMaintenance && !roles.Includes(role.Admin) {
+		return nil, authz.ErrNotAuthorized
+	}
+
 	mode := in.Mode.String()
-	modeDetails := "Applied configuration with a reboot"
-	modeErr := ""
+
+	var modeDetails string
 
 	if in.Mode != machine.ApplyConfigurationRequest_TRY {
 		s.Controller.Runtime().CancelConfigRollbackTimeout()
@@ -186,8 +211,16 @@ func (s *Server) ApplyConfiguration(ctx context.Context, in *machine.ApplyConfig
 	// as we are not in maintenance mode, the v1alpha1 config should be always present
 	// in the future we should allow to remove v1alpha1, but for now for better UX we deny
 	// such requests to avoid confusion
-	if cfgProvider.RawV1Alpha1() == nil {
+	if !inMaintenance && cfgProvider.RawV1Alpha1() == nil {
 		return nil, status.Error(codes.InvalidArgument, "the applied machine configuration doesn't contain v1alpha1 config, did you mean to patch the machine config instead?")
+	}
+
+	if in.Mode == machine.ApplyConfigurationRequest_REBOOT { //nolint:staticcheck // backwards compatibility
+		if inMaintenance {
+			in.Mode = machine.ApplyConfigurationRequest_NO_REBOOT
+		} else {
+			return nil, status.Error(codes.Unimplemented, "the REBOOT mode is not supported, please use AUTO or NO_REBOOT modes instead")
+		}
 	}
 
 	validationMode := modeWrapper{
@@ -195,45 +228,30 @@ func (s *Server) ApplyConfiguration(ctx context.Context, in *machine.ApplyConfig
 		installed: s.Controller.Runtime().State().Machine().Installed(),
 	}
 
-	warnings, err := cfgProvider.Validate(validationMode)
+	warnings, err := cfgProvider.ValidateAtRuntime(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), validationMode)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-
-	warningsRuntime, err := cfgProvider.RuntimeValidate(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), validationMode)
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-
-	warnings = slices.Concat(warnings, warningsRuntime)
 
 	//nolint:exhaustive
 	switch in.Mode {
+	// --mode=auto
+	case machine.ApplyConfigurationRequest_AUTO:
+		in.Mode = machine.ApplyConfigurationRequest_NO_REBOOT
+		mode = fmt.Sprintf("%s(%s)", mode, in.Mode)
+
+		fallthrough
 	// --mode=try
 	case machine.ApplyConfigurationRequest_TRY:
 		fallthrough
 	// --mode=no-reboot
 	case machine.ApplyConfigurationRequest_NO_REBOOT:
-		if err = s.Controller.Runtime().CanApplyImmediate(cfgProvider); err != nil {
-			return nil, status.Error(codes.InvalidArgument, err.Error())
-		}
-
 		modeDetails = "Applied configuration without a reboot"
 	// --mode=staged
 	case machine.ApplyConfigurationRequest_STAGED:
 		modeDetails = "Staged configuration to be applied after the next reboot"
-	// --mode=auto detect actual update mode
-	case machine.ApplyConfigurationRequest_AUTO:
-		if err = s.Controller.Runtime().CanApplyImmediate(cfgProvider); err != nil {
-			in.Mode = machine.ApplyConfigurationRequest_REBOOT
-			modeDetails = "Applied configuration with a reboot"
-			modeErr = ": " + err.Error()
-		} else {
-			in.Mode = machine.ApplyConfigurationRequest_NO_REBOOT
-			modeDetails = "Applied configuration without a reboot"
-		}
-
-		mode = fmt.Sprintf("%s(%s)", mode, in.Mode)
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "incorrect mode '%s' specified for the apply config call", in.Mode.String())
 	}
 
 	if in.DryRun {
@@ -288,21 +306,6 @@ func (s *Server) ApplyConfiguration(ctx context.Context, in *machine.ApplyConfig
 		if err := s.Controller.Runtime().SetPersistedConfig(cfgProvider); err != nil {
 			return nil, err
 		}
-	// --mode=reboot
-	case machine.ApplyConfigurationRequest_REBOOT:
-		if err := s.Controller.Runtime().SetPersistedConfig(cfgProvider); err != nil {
-			return nil, err
-		}
-
-		go func() {
-			if err := s.Controller.Run(context.Background(), runtime.SequenceReboot, nil, runtime.WithTakeover()); err != nil {
-				if !runtime.IsRebootError(err) {
-					log.Println("apply configuration failed:", err)
-				}
-			}
-		}()
-	default:
-		return nil, fmt.Errorf("incorrect mode '%s' specified for the apply config call", in.Mode.String())
 	}
 
 	return &machine.ApplyConfigurationResponse{
@@ -310,14 +313,14 @@ func (s *Server) ApplyConfiguration(ctx context.Context, in *machine.ApplyConfig
 			{
 				Mode:        in.Mode,
 				Warnings:    warnings,
-				ModeDetails: modeDetails + modeErr,
+				ModeDetails: modeDetails,
 			},
 		},
 	}, nil
 }
 
 func generateDiff(r runtime.Runtime, provider config.Provider) (string, error) {
-	documentsDiff, err := configdiff.DiffToString(r.ConfigContainer(), provider)
+	documentsDiff, err := configdiff.DiffConfigs(r.ConfigContainer(), provider)
 	if err != nil {
 		return "", err
 	}
@@ -411,8 +414,15 @@ func (s *Server) Bootstrap(ctx context.Context, in *machine.BootstrapRequest) (r
 		return nil, status.Error(codes.FailedPrecondition, "bootstrap is not available yet")
 	}
 
-	if s.Controller.Runtime().Config().Machine().Type() == machinetype.TypeWorker {
-		return nil, status.Error(codes.FailedPrecondition, "bootstrap can only be performed on a control plane node")
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "bootstrap"); err != nil {
+		return nil, err
+	}
+
+	hasEtcdCA := s.Controller.Runtime().Config() != nil && s.Controller.Runtime().Config().Cluster() != nil && s.Controller.Runtime().Config().Cluster().Etcd().CA() != nil
+	if !hasEtcdCA {
+		// there is no etcd CA in the machine config, but we already have machine type (previous check),
+		// so reject the bootstrap as a terminal error
+		return nil, status.Error(codes.InvalidArgument, "etcd is not configured, bootstrap is not possible")
 	}
 
 	timeCtx, timeCtxCancel := context.WithTimeout(ctx, 5*time.Second)
@@ -472,9 +482,14 @@ func (s *Server) Shutdown(ctx context.Context, in *machine.ShutdownRequest) (rep
 
 // Upgrade initiates an upgrade.
 //
-//nolint:gocyclo
+//nolint:gocyclo,cyclop
 func (s *Server) Upgrade(ctx context.Context, in *machine.UpgradeRequest) (*machine.UpgradeResponse, error) {
+	if s.Controller.Runtime().State().Platform().Mode().IsAgent() {
+		return nil, status.Error(codes.Unimplemented, "API is not implemented in agent mode")
+	}
+
 	actorID := uuid.New().String()
+	inMaintenance := !s.Controller.Runtime().ConfigCompleteForBoot()
 
 	ctx = context.WithValue(ctx, runtime.ActorIDCtxKey{}, actorID)
 
@@ -482,19 +497,30 @@ func (s *Server) Upgrade(ctx context.Context, in *machine.UpgradeRequest) (*mach
 		return nil, err
 	}
 
+	if !s.Controller.Runtime().State().Machine().Installed() {
+		return nil, status.Errorf(codes.FailedPrecondition, "Talos is not installed")
+	}
+
 	log.Printf("upgrade request received: staged %v, force %v, reboot mode %v", in.GetStage(), in.GetForce(), in.GetRebootMode().String())
 
 	log.Printf("validating %q", in.GetImage())
 
-	if err := install.PullAndValidateInstallerImage(ctx, crires.RegistryBuilder(s.Controller.Runtime().State().V1Alpha2().Resources()), in.GetImage()); err != nil {
+	if err := install.PullAndValidateInstallerImage(
+		ctx,
+		s.Controller.Runtime().State().V1Alpha2().Resources(),
+		crires.RegistryBuilder(s.Controller.Runtime().State().V1Alpha2().Resources()),
+		in.GetImage(),
+	); err != nil {
 		return nil, fmt.Errorf("error validating installer image %q: %w", in.GetImage(), err)
 	}
 
-	if s.Controller.Runtime().Config().Machine().Type() != machinetype.TypeWorker && !in.GetForce() {
+	if !inMaintenance && s.Controller.Runtime().Config().Machine().Type() != machinetype.TypeWorker && !in.GetForce() && !in.GetPreserve() {
 		etcdClient, err := etcd.NewClientFromControlPlaneIPs(ctx, s.Controller.Runtime().State().V1Alpha2().Resources())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create etcd client: %w", err)
 		}
+
+		defer etcdClient.Close() //nolint:errcheck
 
 		// acquire the upgrade mutex
 		unlocker, err := tryLockUpgradeMutex(ctx, etcdClient)
@@ -512,12 +538,21 @@ func (s *Server) Upgrade(ctx context.Context, in *machine.UpgradeRequest) (*mach
 
 	runCtx := context.WithValue(context.Background(), runtime.ActorIDCtxKey{}, actorID)
 
-	if in.GetStage() {
+	switch {
+	case inMaintenance:
+		go func() {
+			if err := s.Controller.Run(runCtx, runtime.SequenceMaintenanceUpgrade, in); err != nil {
+				if !runtime.IsRebootError(err) {
+					log.Println("upgrade failed:", err)
+				}
+			}
+		}()
+	case in.GetStage():
 		if ok, err := s.Controller.Runtime().State().Machine().Meta().SetTag(ctx, meta.StagedUpgradeImageRef, in.GetImage()); !ok || err != nil {
 			return nil, fmt.Errorf("error adding staged upgrade image ref tag: %w", err)
 		}
 
-		opts := install.DefaultInstallOptions()
+		opts := install.Options{Pull: true} //nolint:staticcheck
 		if err := opts.Apply(install.OptionsFromUpgradeRequest(s.Controller.Runtime(), in)...); err != nil {
 			return nil, fmt.Errorf("error applying install options: %w", err)
 		}
@@ -544,7 +579,7 @@ func (s *Server) Upgrade(ctx context.Context, in *machine.UpgradeRequest) (*mach
 				}
 			}
 		}()
-	} else {
+	default:
 		go func() {
 			if err := s.Controller.Run(runCtx, runtime.SequenceUpgrade, in); err != nil {
 				if !runtime.IsRebootError(err) {
@@ -595,6 +630,10 @@ func (opt *ResetOptions) String() string {
 //
 //nolint:gocyclo,cyclop
 func (s *Server) Reset(ctx context.Context, in *machine.ResetRequest) (reply *machine.ResetResponse, err error) {
+	if s.Controller.Runtime().State().Platform().Mode().IsAgent() {
+		return nil, status.Error(codes.Unimplemented, "API is not implemented in agent mode")
+	}
+
 	actorID := uuid.New().String()
 
 	log.Printf("reset request received. actorID: %s", actorID)
@@ -647,19 +686,45 @@ func (s *Server) Reset(ctx context.Context, in *machine.ResetRequest) (reply *ma
 			return nil, errors.New("reset failed: invalid input, wipe mode USER_DISKS doesn't support SystemPartitionsToWipe parameter")
 		}
 
-		for _, spec := range in.GetSystemPartitionsToWipe() {
-			volumeStatus, err := safe.ReaderGetByID[*block.VolumeStatus](ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), spec.Label)
+		st := s.Controller.Runtime().State().V1Alpha2().Resources()
+
+		// the set of volumes requested to be wiped, so that a volume which resides on another volume
+		// can be matched against it regardless of the order of the entries
+		wipeRequested := xslices.ToSetFunc(
+			xslices.Filter(in.GetSystemPartitionsToWipe(), func(spec *machine.ResetPartitionSpec) bool { return spec.GetWipe() }),
+			func(spec *machine.ResetPartitionSpec) string { return spec.GetLabel() },
+		)
+
+		for _, resetPartitionSpec := range in.GetSystemPartitionsToWipe() {
+			volumeStatus, err := safe.ReaderGetByID[*block.VolumeStatus](ctx, st, resetPartitionSpec.Label)
 			if err != nil {
-				return nil, fmt.Errorf("failed to get volume status with label %q: %w", spec.Label, err)
+				return nil, fmt.Errorf("failed to get volume status with label %q: %w", resetPartitionSpec.Label, err)
 			}
 
 			if volumeStatus.TypedSpec().Location == "" {
-				return nil, fmt.Errorf("failed to reset: volume %q is not located", spec.Label)
+				// the volume has no block device of its own (e.g. a directory-backed system volume
+				// nested under EPHEMERAL): it has no wipe target, and it is only wiped as a side effect
+				// of wiping the volume it resides on, so require that volume to be wiped as well
+				backingVolume, err := system.FindBackingVolume(ctx, st, resetPartitionSpec.Label)
+				if err != nil {
+					return nil, fmt.Errorf("failed to reset: %w", err)
+				}
+
+				if _, ok := wipeRequested[backingVolume]; !ok {
+					return nil, fmt.Errorf(
+						"failed to reset: volume %q resides on volume %q, and therefore %q cannot be wiped without wiping %q",
+						resetPartitionSpec.Label, backingVolume, resetPartitionSpec.Label, backingVolume,
+					)
+				}
+
+				log.Printf("reset: volume %q (%s) is wiped as part of wiping volume %q", resetPartitionSpec.Label, volumeStatus.TypedSpec().Type, backingVolume)
+
+				continue
 			}
 
 			target := partition.VolumeWipeTargetFromVolumeStatus(volumeStatus)
 
-			if spec.Wipe {
+			if resetPartitionSpec.Wipe {
 				opts.systemDiskTargets = append(opts.systemDiskTargets, target)
 			}
 		}
@@ -795,16 +860,7 @@ func (s *Server) Copy(req *machine.CopyRequest, obj machine.MachineService_CopyS
 		}
 	}
 
-	archiveErr := <-errCh
-	if archiveErr != nil {
-		return obj.SendMsg(&common.Data{
-			Metadata: &common.Metadata{
-				Error: archiveErr.Error(),
-			},
-		})
-	}
-
-	return nil
+	return <-errCh
 }
 
 // List implements the machine.MachineServer interface.
@@ -1197,13 +1253,29 @@ func (s *Server) Version(ctx context.Context, in *emptypb.Empty) (reply *machine
 
 // Kubeconfig implements the machine.MachineServer interface.
 func (s *Server) Kubeconfig(empty *emptypb.Empty, obj machine.MachineService_KubeconfigServer) error {
-	if err := s.checkControlplane("kubeconfig"); err != nil {
+	if err := machinehelper.CheckControlplane(obj.Context(), s.Controller.Runtime().State().V1Alpha2().Resources(), "kubeconfig"); err != nil {
 		return err
 	}
 
 	var b bytes.Buffer
 
-	if err := kubeconfig.GenerateAdmin(s.Controller.Runtime().Config().Cluster(), &b); err != nil {
+	k8sCAConfig := s.Controller.Runtime().Config().K8sAPIServerCAConfig()
+	if k8sCAConfig == nil {
+		return status.Error(codes.FailedPrecondition, "k8s API server CA config is not set")
+	}
+
+	if err := kubeconfig.GenerateAdmin(
+		struct {
+			configconfig.ClusterConfig
+			configconfig.K8sAPIServerCAConfig
+			configconfig.K8sClusterConfig
+		}{
+			ClusterConfig:        s.Controller.Runtime().Config().Cluster(),
+			K8sAPIServerCAConfig: k8sCAConfig,
+			K8sClusterConfig:     s.Controller.Runtime().Config().K8sClusterConfig(),
+		},
+		&b,
+	); err != nil {
 		return err
 	}
 
@@ -1318,6 +1390,10 @@ func k8slogs(ctx context.Context, req *machine.LogsRequest) (chunker.Chunker, io
 }
 
 func getContainerInspector(ctx context.Context, namespace string, driver common.ContainerDriver) (containers.Inspector, error) {
+	if namespace == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "namespace can't be empty")
+	}
+
 	switch driver {
 	case common.ContainerDriver_CRI:
 		if namespace != constants.K8sContainerdNamespace {
@@ -1333,7 +1409,7 @@ func getContainerInspector(ctx context.Context, namespace string, driver common.
 
 		return taloscontainerd.NewInspector(ctx, namespace, taloscontainerd.WithContainerdAddress(addr))
 	default:
-		return nil, fmt.Errorf("unsupported driver %q", driver)
+		return nil, status.Errorf(codes.InvalidArgument, "unsupported driver %q", driver)
 	}
 }
 
@@ -1443,7 +1519,7 @@ func (s *Server) Events(req *machine.EventsRequest, l machine.MachineService_Eve
 }
 
 func sendEmptyEvent(req *machine.EventsRequest, l machine.MachineService_EventsServer) error {
-	emptyEvent, err := pointer.To(runtime.NewEvent(nil, req.WithActorId)).ToMachineEvent()
+	emptyEvent, err := new(runtime.NewEvent(nil, req.WithActorId)).ToMachineEvent()
 	if err != nil {
 		return err
 	}
@@ -1622,18 +1698,14 @@ func (s *Server) Dmesg(req *machine.DmesgRequest, srv machine.MachineService_Dme
 			}
 
 			if packet.Err != nil {
-				err = srv.Send(&common.Data{
-					Metadata: &common.Metadata{
-						Error: packet.Err.Error(),
-					},
-				})
-			} else {
-				msg := packet.Message
-				err = srv.Send(&common.Data{
-					Bytes: fmt.Appendf(nil, "%s: %7s: [%s]: %s", msg.Facility, msg.Priority, msg.Timestamp.Format(time.RFC3339Nano), msg.Message),
-				})
+				return packet.Err
 			}
 
+			msg := packet.Message
+
+			err = srv.Send(&common.Data{
+				Bytes: fmt.Appendf(nil, "%s: %7s: [%s]: %s", msg.Facility, msg.Priority, msg.Timestamp.Format(time.RFC3339Nano), msg.Message),
+			})
 			if err != nil {
 				return err
 			}
@@ -1750,7 +1822,7 @@ func (s *Server) Memory(ctx context.Context, in *emptypb.Empty) (reply *machine.
 
 // EtcdMemberList implements the machine.MachineServer interface.
 func (s *Server) EtcdMemberList(ctx context.Context, in *machine.EtcdMemberListRequest) (*machine.EtcdMemberListResponse, error) {
-	if err := s.checkControlplane("member list"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "member list"); err != nil {
 		return nil, err
 	}
 
@@ -1799,7 +1871,7 @@ func (s *Server) EtcdMemberList(ctx context.Context, in *machine.EtcdMemberListR
 
 // EtcdRemoveMemberByID implements the machine.MachineServer interface.
 func (s *Server) EtcdRemoveMemberByID(ctx context.Context, in *machine.EtcdRemoveMemberByIDRequest) (*machine.EtcdRemoveMemberByIDResponse, error) {
-	if err := s.checkControlplane("etcd remove member"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd remove member"); err != nil {
 		return nil, err
 	}
 
@@ -1829,7 +1901,7 @@ func (s *Server) EtcdRemoveMemberByID(ctx context.Context, in *machine.EtcdRemov
 
 // EtcdLeaveCluster implements the machine.MachineServer interface.
 func (s *Server) EtcdLeaveCluster(ctx context.Context, in *machine.EtcdLeaveClusterRequest) (*machine.EtcdLeaveClusterResponse, error) {
-	if err := s.checkControlplane("etcd leave"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd leave"); err != nil {
 		return nil, err
 	}
 
@@ -1855,7 +1927,7 @@ func (s *Server) EtcdLeaveCluster(ctx context.Context, in *machine.EtcdLeaveClus
 
 // EtcdForfeitLeadership implements the machine.MachineServer interface.
 func (s *Server) EtcdForfeitLeadership(ctx context.Context, in *machine.EtcdForfeitLeadershipRequest) (*machine.EtcdForfeitLeadershipResponse, error) {
-	if err := s.checkControlplane("etcd forfeit leadership"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd forfeit leadership"); err != nil {
 		return nil, err
 	}
 
@@ -1889,7 +1961,7 @@ func (s *Server) EtcdForfeitLeadership(ctx context.Context, in *machine.EtcdForf
 
 // EtcdSnapshot implements the machine.MachineServer interface.
 func (s *Server) EtcdSnapshot(in *machine.EtcdSnapshotRequest, srv machine.MachineService_EtcdSnapshotServer) error {
-	if err := s.checkControlplane("etcd snapshot"); err != nil {
+	if err := machinehelper.CheckControlplane(srv.Context(), s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd snapshot"); err != nil {
 		return err
 	}
 
@@ -1936,7 +2008,7 @@ func (s *Server) EtcdRecover(srv machine.MachineService_EtcdRecoverServer) error
 		return err
 	}
 
-	if err := s.checkControlplane("etcd recover"); err != nil {
+	if err := machinehelper.CheckControlplane(srv.Context(), s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd recover"); err != nil {
 		return err
 	}
 
@@ -2016,7 +2088,7 @@ func mapAlarms(alarms []*etcdserverpb.AlarmMember) []*machine.EtcdMemberAlarm {
 //
 // This method is available only on control plane nodes (which run etcd).
 func (s *Server) EtcdAlarmList(ctx context.Context, in *emptypb.Empty) (*machine.EtcdAlarmListResponse, error) {
-	if err := s.checkControlplane("etcd alarm list"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd alarm list"); err != nil {
 		return nil, err
 	}
 
@@ -2046,7 +2118,7 @@ func (s *Server) EtcdAlarmList(ctx context.Context, in *emptypb.Empty) (*machine
 //
 // This method is available only on control plane nodes (which run etcd).
 func (s *Server) EtcdAlarmDisarm(ctx context.Context, in *emptypb.Empty) (*machine.EtcdAlarmDisarmResponse, error) {
-	if err := s.checkControlplane("etcd alarm list"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd alarm disarm"); err != nil {
 		return nil, err
 	}
 
@@ -2079,7 +2151,7 @@ func (s *Server) EtcdAlarmDisarm(ctx context.Context, in *emptypb.Empty) (*machi
 //
 // This method is available only on control plane nodes (which run etcd).
 func (s *Server) EtcdDefragment(ctx context.Context, in *emptypb.Empty) (*machine.EtcdDefragmentResponse, error) {
-	if err := s.checkControlplane("etcd defragment"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd defragment"); err != nil {
 		return nil, err
 	}
 
@@ -2107,7 +2179,7 @@ func (s *Server) EtcdDefragment(ctx context.Context, in *emptypb.Empty) (*machin
 //
 // This method is available only on control plane nodes (which run etcd).
 func (s *Server) EtcdStatus(ctx context.Context, in *emptypb.Empty) (*machine.EtcdStatusResponse, error) {
-	if err := s.checkControlplane("etcd status"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd status"); err != nil {
 		return nil, err
 	}
 
@@ -2161,7 +2233,7 @@ func (s *Server) EtcdStatus(ctx context.Context, in *emptypb.Empty) (*machine.Et
 //
 // This method is available only on control plane nodes (which run etcd).
 func (s *Server) EtcdDowngradeCancel(ctx context.Context, _ *emptypb.Empty) (*machine.EtcdDowngradeCancelResponse, error) {
-	if err := s.checkControlplane("etcd downgrade cancel"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd downgrade cancel"); err != nil {
 		return nil, err
 	}
 
@@ -2195,7 +2267,7 @@ func (s *Server) EtcdDowngradeCancel(ctx context.Context, _ *emptypb.Empty) (*ma
 //
 //nolint:dupl
 func (s *Server) EtcdDowngradeEnable(ctx context.Context, in *machine.EtcdDowngradeEnableRequest) (*machine.EtcdDowngradeEnableResponse, error) {
-	if err := s.checkControlplane("etcd downgrade cancel"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd downgrade enable"); err != nil {
 		return nil, err
 	}
 
@@ -2233,7 +2305,7 @@ func (s *Server) EtcdDowngradeEnable(ctx context.Context, in *machine.EtcdDowngr
 //
 //nolint:dupl
 func (s *Server) EtcdDowngradeValidate(ctx context.Context, in *machine.EtcdDowngradeValidateRequest) (*machine.EtcdDowngradeValidateResponse, error) {
-	if err := s.checkControlplane("etcd downgrade cancel"); err != nil {
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "etcd downgrade validate"); err != nil {
 		return nil, err
 	}
 
@@ -2297,8 +2369,8 @@ func validateDowngrade(version string) error {
 
 // GenerateClientConfiguration implements the machine.MachineServer interface.
 func (s *Server) GenerateClientConfiguration(ctx context.Context, in *machine.GenerateClientConfigurationRequest) (*machine.GenerateClientConfigurationResponse, error) {
-	if s.Controller.Runtime().Config().Machine().Type() == machinetype.TypeWorker {
-		return nil, status.Error(codes.FailedPrecondition, "client configuration (talosconfig) can't be generated on worker nodes")
+	if err := machinehelper.CheckControlplane(ctx, s.Controller.Runtime().State().V1Alpha2().Resources(), "generate client configuration"); err != nil {
+		return nil, err
 	}
 
 	crtTTL := in.CrtTtl.AsDuration()
@@ -2308,7 +2380,10 @@ func (s *Server) GenerateClientConfiguration(ctx context.Context, in *machine.Ge
 
 	roles, _ := role.Parse(in.Roles)
 
-	secretsBundle := secrets.NewBundleFromConfig(secrets.NewFixedClock(time.Now()), s.Controller.Runtime().Config())
+	secretsBundle, err := secrets.NewBundleFromConfig(secrets.NewFixedClock(time.Now()), s.Controller.Runtime().Config())
+	if err != nil {
+		return nil, fmt.Errorf("error creating secrets bundle from config: %w", err)
+	}
 
 	cert, err := secretsBundle.GenerateTalosAPIClientCertificateWithTTL(roles, crtTTL)
 	if err != nil {
@@ -2316,7 +2391,7 @@ func (s *Server) GenerateClientConfiguration(ctx context.Context, in *machine.Ge
 	}
 
 	// make a nice context name
-	contextName := s.Controller.Runtime().Config().Cluster().Name()
+	contextName := s.Controller.Runtime().Config().K8sClusterConfig().ClusterName()
 	if r := roles.Strings(); len(r) == 1 {
 		contextName = strings.TrimPrefix(r[0], role.Prefix) + "@" + contextName
 	}
@@ -2488,7 +2563,8 @@ func capturePackets(ctx context.Context, w io.Writer, handle *afpacket.TPacket, 
 }
 
 func tryLockUpgradeMutex(ctx context.Context, etcdClient *etcd.Client) (unlock func(), err error) {
-	sess, err := concurrency.NewSession(etcdClient.Client,
+	sess, err := concurrency.NewSession(
+		etcdClient.Client,
 		concurrency.WithContext(ctx),
 		concurrency.WithTTL(MinimumEtcdUpgradeLeaseLockSeconds),
 	)
@@ -2522,23 +2598,19 @@ func tryLockUpgradeMutex(ctx context.Context, etcdClient *etcd.Client) (unlock f
 
 // Netstat implements the machine.MachineServer interface.
 func (s *Server) Netstat(ctx context.Context, req *machine.NetstatRequest) (*machine.NetstatResponse, error) {
-	if req == nil {
-		req = new(machine.NetstatRequest)
-	}
-
 	features := netstat.EnableFeatures{
-		TCP:           req.L4Proto.Tcp,
-		TCP6:          req.L4Proto.Tcp6,
-		UDP:           req.L4Proto.Udp,
-		UDP6:          req.L4Proto.Udp6,
-		UDPLite:       req.L4Proto.Udplite,
-		UDPLite6:      req.L4Proto.Udplite6,
-		Raw:           req.L4Proto.Raw,
-		Raw6:          req.L4Proto.Raw6,
-		PID:           req.Feature.Pid,
-		NoHostNetwork: !req.Netns.Hostnetwork,
-		AllNetNs:      req.Netns.Allnetns,
-		NetNsName:     req.Netns.Netns,
+		TCP:           req.GetL4Proto().GetTcp(),
+		TCP6:          req.GetL4Proto().GetTcp6(),
+		UDP:           req.GetL4Proto().GetUdp(),
+		UDP6:          req.GetL4Proto().GetUdp6(),
+		UDPLite:       req.GetL4Proto().GetUdplite(),
+		UDPLite6:      req.GetL4Proto().GetUdplite6(),
+		Raw:           req.GetL4Proto().GetRaw(),
+		Raw6:          req.GetL4Proto().GetRaw6(),
+		PID:           req.GetFeature().GetPid(),
+		NoHostNetwork: !req.GetNetns().GetHostnetwork(),
+		AllNetNs:      req.GetNetns().GetAllnetns(),
+		NetNsName:     req.GetNetns().GetNetns(),
 	}
 
 	var fn netstat.AcceptFn
@@ -2554,6 +2626,8 @@ func (s *Server) Netstat(ctx context.Context, req *machine.NetstatRequest) (*mac
 		fn = func(s *netstat.SockTabEntry) bool {
 			return !s.RemoteEndpoint.IP.IsUnspecified() && s.RemoteEndpoint.Port != 0
 		}
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "invalid filter: %v", req.Filter)
 	}
 
 	netstatResp, err := netstat.Netstat(ctx, features, fn)

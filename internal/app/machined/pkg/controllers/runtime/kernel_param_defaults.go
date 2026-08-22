@@ -88,6 +88,14 @@ func (ctrl *KernelParamDefaultsController) getKernelParams() []*kernel.Param {
 			Key:   "proc.sys.net.ipv4.icmp_echo_ignore_broadcasts",
 			Value: "1",
 		},
+		{
+			Key:   "proc.sys.net.ipv4.conf.all.send_redirects",
+			Value: "0",
+		},
+		{
+			Key:   "proc.sys.net.ipv4.conf.default.send_redirects",
+			Value: "0",
+		},
 	}
 
 	// block apid and trustd from the ephemeral port range
@@ -107,6 +115,11 @@ func (ctrl *KernelParamDefaultsController) getKernelParams() []*kernel.Param {
 			{
 				Key:   "proc.sys.net.bridge.bridge-nf-call-ip6tables",
 				Value: "1",
+			},
+			{
+				Key: "proc.sys.kernel.ctrl-alt-del",
+				// Make Ctrl-Alt-Del trigger a SIGINT to init process
+				Value: "0",
 			},
 		}...)
 	}

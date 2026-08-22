@@ -31,11 +31,11 @@ const maxMsgSize = 1024 * 1024 * 16
 
 // NewClient builds CRI client.
 func NewClient(endpoint string, _ time.Duration) (*Client, error) {
-	conn, err := grpc.NewClient(endpoint,
+	conn, err := grpc.NewClient(
+		endpoint,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMsgSize)),
 		grpc.WithContextDialer(dialer.DialUnix()),
-		grpc.WithSharedWriteBuffer(true),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("error connecting to CRI: %w", err)

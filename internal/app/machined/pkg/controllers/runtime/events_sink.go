@@ -70,7 +70,8 @@ func (ctrl *EventsSinkController) Run(ctx context.Context, r controller.Runtime,
 		}
 	}()
 
-	if err := networkutils.WaitForNetworkReady(ctx, r,
+	if err := networkutils.WaitForNetworkReady(
+		ctx, r,
 		func(status *network.StatusSpec) bool {
 			return status.AddressReady
 		},
@@ -166,7 +167,6 @@ func (ctrl *EventsSinkController) Run(ctx context.Context, r controller.Runtime,
 			conn, err = grpc.NewClient(
 				cfg.TypedSpec().Endpoint,
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpc.WithSharedWriteBuffer(true),
 				grpc.WithContextDialer(dialer.DynamicProxyDialerWithTLSConfig(httpdefaults.RootCAsTLSConfig)),
 			)
 			if err != nil {

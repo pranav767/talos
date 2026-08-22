@@ -68,7 +68,13 @@ type ExistingVolumeConfigV1Alpha1 struct {
 	VolumeDiscoverySpec VolumeDiscoverySpec `yaml:"discovery,omitempty"`
 	//   description: |
 	//     The mount describes additional mount options.
-	MountSpec MountSpec `yaml:"mount,omitempty"`
+	MountSpec ExistingMountSpec `yaml:"mount,omitempty"`
+	//   description: |
+	//     The trim describes the per-volume filesystem trim (fstrim) configuration.
+	TrimSpec *TrimConfig `yaml:"trim,omitempty"`
+	//   description: |
+	//     The scrub describes the per-volume filesystem scrub configuration.
+	ScrubSpec *ScrubConfig `yaml:"scrub,omitempty"`
 }
 
 // VolumeDiscoverySpec describes how the volume is discovered.
@@ -102,11 +108,19 @@ func exampleVolumeSelector2() cel.Expression {
 	return cel.MustExpression(cel.ParseBooleanExpression(`volume.name == "xfs" && disk.serial == "SERIAL123"`, celenv.VolumeLocator()))
 }
 
-// MountSpec describes how the volume is mounted.
-type MountSpec struct {
+// ExistingMountSpec describes how the volume is mounted.
+type ExistingMountSpec struct {
 	//   description: |
 	//     Mount the volume read-only.
 	MountReadOnly *bool `yaml:"readOnly,omitempty"`
+	//   description: |
+	//     If true, disable file access time updates.
+	MountDisableAccessTime *bool `yaml:"disableAccessTime,omitempty"`
+	//   description: |
+	//     Enable secure mount options (nosuid, nodev, noexec).
+	//
+	//     Defaults to true for better security.
+	MountSecure *bool `yaml:"secure,omitempty"`
 }
 
 // NewExistingVolumeConfigV1Alpha1 creates a new raw volume config document.
@@ -151,7 +165,7 @@ func (s *ExistingVolumeConfigV1Alpha1) ConflictsWithKinds() []string {
 //nolint:gocyclo,dupl
 func (s *ExistingVolumeConfigV1Alpha1) Validate(validation.RuntimeMode, ...validation.Option) ([]string, error) {
 	var (
-		warnings         []string
+		warnings         []string //nolint:prealloc
 		validationErrors error
 	)
 
@@ -181,6 +195,14 @@ func (s *ExistingVolumeConfigV1Alpha1) Validate(validation.RuntimeMode, ...valid
 	warnings = append(warnings, extraWarnings...)
 	validationErrors = errors.Join(validationErrors, extraErrors)
 
+	if err := s.TrimSpec.Validate(); err != nil {
+		validationErrors = errors.Join(validationErrors, err)
+	}
+
+	if err := s.ScrubSpec.Validate(); err != nil {
+		validationErrors = errors.Join(validationErrors, err)
+	}
+
 	return warnings, validationErrors
 }
 
@@ -193,8 +215,26 @@ func (s *ExistingVolumeConfigV1Alpha1) VolumeDiscovery() config.VolumeDiscoveryC
 }
 
 // Mount implements config.ExistingVolumeConfig interface.
-func (s *ExistingVolumeConfigV1Alpha1) Mount() config.VolumeMountConfig {
+func (s *ExistingVolumeConfigV1Alpha1) Mount() config.ExistingVolumeMountConfig {
 	return s.MountSpec
+}
+
+// Trim implements config.ExistingVolumeConfig interface.
+func (s *ExistingVolumeConfigV1Alpha1) Trim() config.VolumeTrimConfig {
+	if s.TrimSpec == nil {
+		return nil
+	}
+
+	return s.TrimSpec
+}
+
+// Scrub implements config.ExistingVolumeConfig interface.
+func (s *ExistingVolumeConfigV1Alpha1) Scrub() config.VolumeScrubConfig {
+	if s.ScrubSpec == nil {
+		return nil
+	}
+
+	return s.ScrubSpec
 }
 
 // Validate the provisioning spec.
@@ -217,7 +257,21 @@ func (s VolumeDiscoverySpec) VolumeSelector() cel.Expression {
 	return s.VolumeSelectorConfig.Match
 }
 
-// ReadOnly implements config.VolumeMountConfig interface.
-func (s MountSpec) ReadOnly() bool {
+// ReadOnly implements config.ExistingVolumeMountConfig interface.
+func (s ExistingMountSpec) ReadOnly() bool {
 	return pointer.SafeDeref(s.MountReadOnly)
+}
+
+// DisableAccessTime implements config.ExistingVolumeMountConfig interface.
+func (s ExistingMountSpec) DisableAccessTime() bool {
+	return pointer.SafeDeref(s.MountDisableAccessTime)
+}
+
+// Secure implements config.ExistingVolumeMountConfig interface.
+func (s ExistingMountSpec) Secure() bool {
+	if s.MountSecure == nil {
+		return true
+	}
+
+	return *s.MountSecure
 }

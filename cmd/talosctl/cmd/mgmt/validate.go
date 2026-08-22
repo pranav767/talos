@@ -43,10 +43,11 @@ var validateCmd = &cobra.Command{
 			opts = append(opts, validation.WithStrict())
 		}
 
-		warnings, err := cfg.Validate(mode, opts...)
+		warnings, err := cfg.ValidateAsClient(mode, opts...)
 		for _, w := range warnings {
 			cli.Warning("%s", w)
 		}
+
 		if err != nil {
 			return err
 		}

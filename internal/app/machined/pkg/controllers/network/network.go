@@ -9,7 +9,6 @@ import (
 	"net"
 
 	"github.com/siderolabs/gen/pair/ordered"
-	"github.com/siderolabs/go-pointer"
 
 	networkadapter "github.com/siderolabs/talos/internal/app/machined/pkg/adapters/network"
 	talosconfig "github.com/siderolabs/talos/pkg/machinery/config/config"
@@ -45,7 +44,13 @@ func SendBondMaster(link *network.LinkSpecSpec, bond talosconfig.NetworkBondConf
 	link.BondMaster.ADSelect = bond.ADSelect().ValueOrZero()
 	link.BondMaster.ADActorSysPrio = bond.ADActorSysPrio().ValueOrZero()
 	link.BondMaster.ADUserPortKey = bond.ADUserPortKey().ValueOrZero()
-	link.BondMaster.ADLACPActive = bond.ADLACPActive().ValueOr(nethelpers.ADLACPActiveOn)
+
+	if adLACPActive, ok := bond.ADLACPActive().Get(); ok {
+		link.BondMaster.ADLACPActive = new(adLACPActive)
+	} else {
+		link.BondMaster.ADLACPActive = nil
+	}
+
 	link.BondMaster.PrimaryReselect = bond.PrimaryReselect().ValueOrZero()
 	link.BondMaster.ResendIGMP = bond.ResendIGMP().ValueOrZero()
 	link.BondMaster.MinLinks = bond.MinLinks().ValueOrZero()
@@ -127,7 +132,7 @@ func SetBondMasterLegacy(link *network.LinkSpecSpec, bond talosconfig.Bond) erro
 		LACPRate:        lacpRate,
 		ARPValidate:     arpValidate,
 		ARPAllTargets:   arpAllTargets,
-		PrimaryIndex:    pointer.To(primary),
+		PrimaryIndex:    new(primary),
 		PrimaryReselect: primaryReselect,
 		FailOverMac:     failOverMAC,
 		ADSelect:        adSelect,
@@ -145,7 +150,6 @@ func SetBondMasterLegacy(link *network.LinkSpecSpec, bond talosconfig.Bond) erro
 		ADActorSysPrio:  bond.ADActorSysPrio(),
 		ADUserPortKey:   bond.ADUserPortKey(),
 		PeerNotifyDelay: bond.PeerNotifyDelay(),
-		ADLACPActive:    nethelpers.ADLACPActiveOn,
 	}
 	networkadapter.BondMasterSpec(&link.BondMaster).FillDefaults()
 
@@ -192,5 +196,23 @@ func SetBridgeMaster(link *network.LinkSpecSpec, bridge talosconfig.NetworkBridg
 		VLAN: network.BridgeVLANSpec{
 			FilteringEnabled: bridge.VLAN().FilteringEnabled().ValueOrZero(),
 		},
+	}
+}
+
+// SetVRFSlave sets the vrf slave spec.
+func SetVRFSlave(link *network.LinkSpecSpec, vrf string) {
+	link.VRFSlave = network.VRFSlave{
+		MasterName: vrf,
+	}
+}
+
+// SetVRFMaster sets the vrf master spec.
+func SetVRFMaster(link *network.LinkSpecSpec, vrf talosconfig.NetworkVRFConfig) {
+	link.Logical = true
+	link.Kind = network.LinkKindVRF
+	link.Type = nethelpers.LinkEther
+
+	link.VRFMaster = network.VRFMasterSpec{
+		Table: vrf.Table(),
 	}
 }

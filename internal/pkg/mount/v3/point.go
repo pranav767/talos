@@ -87,12 +87,35 @@ func (p *Point) Mount(opts Options) error {
 			}
 		}
 
-		if err := selinux.SetLabel(p.target, p.selinuxLabel); err != nil && !errors.Is(err, unix.ENOTSUP) {
-			return fmt.Errorf("error setting selinux label on %q: %w", p.target, err)
-		}
-
-		return nil
+		return FilterSelinuxLabelErrors(p.Target(), p.FSType(), selinux.SetLabel(p.target, p.selinuxLabel))
 	}, false)
+}
+
+// FilterSelinuxLabelErrors filters out certain errors when setting the SELinux label on the mount point.
+//   - ENOTSUP is ignored for all filesystems, as it indicates that the filesystem does not support extended attributes.
+//   - EROFS is ignored for virtiofs, as it indicates that the underlying filesystem is read-only and does not support setting labels.
+//   - EPERM is ignored for virtiofs, as setting security.selinux xattrs may be blocked by the host or virtiofsd
+//     even though the mount is otherwise functional.
+func FilterSelinuxLabelErrors(target, fstype string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if errors.Is(err, unix.ENOTSUP) {
+		return nil
+	}
+
+	if fstype == "virtiofs" {
+		switch {
+		case errors.Is(err, unix.EROFS):
+			return nil
+		case errors.Is(err, unix.EPERM):
+			return nil
+		default:
+		}
+	}
+
+	return fmt.Errorf("error setting selinux label on %q: %w", target, err)
 }
 
 // Share makes the mount point shared.
@@ -108,7 +131,9 @@ func (p *Point) Share() error {
 
 // UnmountOptions represents options for unmounting a mount point.
 type UnmountOptions struct {
-	Printer func(string, ...any)
+	Printer   func(string, ...any)
+	Recursive bool
+	Lazy      bool
 }
 
 // Release closes the file descriptor of the underlying mount point.
@@ -130,9 +155,17 @@ func (p *Point) Unmount(opts UnmountOptions) error {
 		return nil
 	}
 
-	return p.retry(func() error {
-		return SafeUnmount(context.Background(), opts.Printer, p.target)
+	err := p.retry(func() error {
+		return SafeUnmount(context.Background(), opts.Printer, p.target, opts.Recursive, opts.Lazy)
 	}, true)
+	if err != nil {
+		logSubmounts(opts.Printer, p.target)
+		logMountUsers(opts.Printer, p.target)
+
+		return err
+	}
+
+	return nil
 }
 
 // IsMounted checks if the mount point is mounted by checking the mount on the target.
@@ -179,7 +212,7 @@ func (p *Point) retry(f func() error, isUnmount bool) error {
 				return retry.ExpectedError(err)
 			case unix.EUCLEAN, unix.EIO:
 				if !isUnmount {
-					if errRepair := p.root.RepairFS(); errRepair != nil {
+					if errRepair := p.root.RepairFS(context.Background()); errRepair != nil {
 						return fmt.Errorf("error repairing: %w", errRepair)
 					}
 				}
@@ -192,7 +225,7 @@ func (p *Point) retry(f func() error, isUnmount bool) error {
 				}
 
 				if !isMounted && !isUnmount {
-					if errRepair := p.root.RepairFS(); errRepair != nil {
+					if errRepair := p.root.RepairFS(context.Background()); errRepair != nil {
 						return fmt.Errorf("error repairing: %w", errRepair)
 					}
 
@@ -284,7 +317,62 @@ func (p *Point) RemountReadWrite() error {
 	}, 0)
 }
 
+// SetDisableAccessTime sets or clears the noatime mount attribute.
+func (p *Point) SetDisableAccessTime(disable bool) error {
+	if p.detached {
+		return nil
+	}
+
+	if disable {
+		return p.setattr(&unix.MountAttr{
+			Attr_set: unix.MOUNT_ATTR_NOATIME,
+		}, 0)
+	}
+
+	return p.setattr(&unix.MountAttr{
+		Attr_clr: unix.MOUNT_ATTR_NOATIME,
+	}, 0)
+}
+
+// SetSecure sets or clears the nosuid and nodev mount attributes.
+func (p *Point) SetSecure(secure bool) error {
+	if p.detached {
+		return nil
+	}
+
+	if secure {
+		return p.setattr(&unix.MountAttr{
+			Attr_set: unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV,
+		}, 0)
+	}
+
+	return p.setattr(&unix.MountAttr{
+		Attr_clr: unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV,
+	}, 0)
+}
+
+// SetNoExec sets or clears the noexec mount attribute.
+func (p *Point) SetNoExec(noExec bool) error {
+	if p.detached {
+		return nil
+	}
+
+	if noExec {
+		return p.setattr(&unix.MountAttr{
+			Attr_set: unix.MOUNT_ATTR_NOEXEC,
+		}, 0)
+	}
+
+	return p.setattr(&unix.MountAttr{
+		Attr_clr: unix.MOUNT_ATTR_NOEXEC,
+	}, 0)
+}
+
 func (p *Point) setattr(attr *unix.MountAttr, flags int) error {
+	if (attr.Attr_set&unix.MOUNT_ATTR_NOATIME) != 0 || (attr.Attr_clr&unix.MOUNT_ATTR_NOATIME) != 0 {
+		attr.Attr_clr |= unix.MOUNT_ATTR__ATIME
+	}
+
 	fd, err := p.root.Fd()
 	if err != nil && !errors.Is(err, os.ErrClosed) {
 		return err

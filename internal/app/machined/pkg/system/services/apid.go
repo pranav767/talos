@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-//nolint:golint
+//nolint:revive
 package services
 
 import (
@@ -18,6 +18,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/cap"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/cosi-project/runtime/api/v1alpha1"
+	"github.com/cosi-project/runtime/pkg/safe"
 	"github.com/cosi-project/runtime/pkg/state"
 	"github.com/cosi-project/runtime/pkg/state/protobuf/server"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -34,9 +35,11 @@ import (
 	"github.com/siderolabs/talos/internal/pkg/environment"
 	"github.com/siderolabs/talos/internal/pkg/selinux"
 	"github.com/siderolabs/talos/pkg/conditions"
+	"github.com/siderolabs/talos/pkg/grpc/middleware/auth/unix"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"github.com/siderolabs/talos/pkg/machinery/fipsmode"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
+	runtimeres "github.com/siderolabs/talos/pkg/machinery/resources/runtime"
 	"github.com/siderolabs/talos/pkg/machinery/resources/secrets"
 )
 
@@ -54,12 +57,16 @@ func (o *APID) ID(r runtime.Runtime) string {
 }
 
 // apidResourceFilter filters access to COSI state for apid.
+//
+//nolint:gocyclo
 func apidResourceFilter(_ context.Context, access state.Access) error {
 	if !access.Verb.Readonly() {
 		return errors.New("write access denied")
 	}
 
 	switch {
+	case access.ResourceNamespace == runtimeres.NamespaceName && access.ResourceType == runtimeres.APIServiceConfigType && access.ResourceID == runtimeres.APIServiceConfigID:
+		// allowed, contains apid service configuration
 	case access.ResourceNamespace == secrets.NamespaceName && access.ResourceType == secrets.APIType && access.ResourceID == secrets.APIID:
 		// allowed, contains apid certificates
 	case access.ResourceNamespace == network.NamespaceName && access.ResourceType == network.NodeAddressType:
@@ -107,8 +114,23 @@ func (o *APID) PreFunc(ctx context.Context, r runtime.Runtime) error {
 		return err
 	}
 
+	pidAuthorizer := &unix.Authorizer{
+		Resources: r.State().V1Alpha2().Resources(),
+		AllowedServices: []unix.AllowedService{
+			{
+				Pattern: o.ID(r),
+			},
+		},
+	}
+
 	o.runtimeServer = grpc.NewServer(
-		grpc.SharedWriteBuffer(true),
+		grpc.Creds(unix.NewServerCredentials()),
+		grpc.ChainUnaryInterceptor(
+			pidAuthorizer.UnaryInterceptor(),
+		),
+		grpc.ChainStreamInterceptor(
+			pidAuthorizer.StreamInterceptor(),
+		),
 	)
 	v1alpha1.RegisterStateServer(o.runtimeServer, server.NewState(resources))
 
@@ -126,7 +148,10 @@ func (o *APID) PostFunc(runtime.Runtime, events.ServiceState) (err error) {
 
 // Condition implements the Service interface.
 func (o *APID) Condition(r runtime.Runtime) conditions.Condition {
-	return secrets.NewAPIReadyCondition(r.State().V1Alpha2().Resources())
+	return conditions.WaitForAll(
+		secrets.NewAPIReadyCondition(r.State().V1Alpha2().Resources()),
+		runtimeres.NewAPIServiceConfigCondition(r.State().V1Alpha2().Resources()),
+	)
 }
 
 // DependsOn implements the Service interface.
@@ -143,16 +168,6 @@ func (o *APID) Volumes(runtime.Runtime) []string {
 //
 //nolint:gocyclo
 func (o *APID) Runner(r runtime.Runtime) (runner.Runner, error) {
-	// Ensure socket dir exists
-	if err := os.MkdirAll(filepath.Dir(constants.APISocketPath), 0o750); err != nil {
-		return nil, err
-	}
-
-	// Make sure apid user owns socket directory.
-	if err := os.Chown(filepath.Dir(constants.APISocketPath), constants.ApidUserID, constants.ApidUserID); err != nil {
-		return nil, err
-	}
-
 	// Set the process arguments.
 	args := runner.Args{
 		ID: o.ID(r),
@@ -164,8 +179,9 @@ func (o *APID) Runner(r runtime.Runtime) (runner.Runner, error) {
 	// Set the mounts.
 	mounts := []specs.Mount{
 		{Type: "bind", Destination: "/etc/ssl", Source: "/etc/ssl", Options: []string{"bind", "ro"}},
+		{Type: "bind", Destination: "/apid", Source: "/sbin/init", Options: []string{"bind", "ro"}},
 		{Type: "bind", Destination: filepath.Dir(constants.MachineSocketPath), Source: filepath.Dir(constants.MachineSocketPath), Options: []string{"rbind", "ro"}},
-		{Type: "bind", Destination: filepath.Dir(constants.APISocketPath), Source: filepath.Dir(constants.APISocketPath), Options: []string{"rbind", "rw"}},
+		{Type: "bind", Destination: filepath.Dir(constants.APIRuntimeSocketPath), Source: filepath.Dir(constants.APIRuntimeSocketPath), Options: []string{"rbind", "rw"}},
 	}
 
 	mounts = bindMountContainerMarker(mounts)
@@ -200,35 +216,58 @@ func (o *APID) Runner(r runtime.Runtime) (runner.Runner, error) {
 		env = append(env, constants.EnvFIPS140ModeStrict)
 	}
 
-	return restart.New(containerd.NewRunner(
-		r.Config().Debug(),
-		&args,
-		runner.WithLoggingManager(r.Logging()),
-		runner.WithContainerdAddress(constants.SystemContainerdAddress),
-		runner.WithEnv(env),
-		runner.WithGracefulShutdownTimeout(15*time.Second),
-		runner.WithCgroupPath(constants.CgroupApid),
-		runner.WithSelinuxLabel(constants.SelinuxLabelApid),
-		runner.WithOCISpecOpts(
-			oci.WithDroppedCapabilities(cap.Known()),
-			oci.WithHostNamespace(specs.NetworkNamespace),
-			oci.WithMounts(mounts),
-			oci.WithRootFSPath(filepath.Join(constants.SystemLibexecPath, o.ID(r))),
-			oci.WithRootFSReadonly(),
-			oci.WithUser(fmt.Sprintf("%d:%d", constants.ApidUserID, constants.ApidUserID)),
+	var debug bool
+
+	if r.Config() != nil {
+		debug = r.Config().Debug()
+	}
+
+	return restart.New(
+		containerd.NewRunner(
+			debug,
+			&args,
+			runner.WithLoggingManager(r.Logging()),
+			runner.WithContainerdAddress(constants.SystemContainerdAddress),
+			runner.WithEnv(env),
+			runner.WithGracefulShutdownTimeout(15*time.Second),
+			runner.WithCgroupPath(constants.CgroupApid),
+			runner.WithSelinuxLabel(constants.SelinuxLabelApid),
+			runner.WithOCISpecOpts(
+				oci.WithDroppedCapabilities(cap.Known()),
+				oci.WithHostNamespace(specs.NetworkNamespace),
+				oci.WithMounts(mounts),
+				oci.WithRootFSPath(filepath.Join(constants.SystemLibexecPath, o.ID(r))),
+				oci.WithRootFSReadonly(),
+				oci.WithUIDGID(constants.ApidUserID, constants.ApidUserID),
+			),
+			runner.WithOOMScoreAdj(-998),
 		),
-		runner.WithOOMScoreAdj(-998),
-	),
 		restart.WithType(restart.Forever),
 	), nil
 }
 
 // HealthFunc implements the HealthcheckedService interface.
-func (o *APID) HealthFunc(runtime.Runtime) health.Check {
+func (o *APID) HealthFunc(r runtime.Runtime) health.Check {
 	return func(ctx context.Context) error {
+		cfg, err := safe.ReaderGetByID[*runtimeres.APIServiceConfig](ctx, r.State().V1Alpha2().Resources(), runtimeres.APIServiceConfigID)
+		if err != nil {
+			return fmt.Errorf("failed to get API service config: %w", err)
+		}
+
+		host, port, err := net.SplitHostPort(cfg.TypedSpec().ListenAddress)
+		if err != nil {
+			return fmt.Errorf("invalid listen address in API service config: %w", err)
+		}
+
+		if host == "" {
+			host = "127.0.0.1"
+		}
+
+		endpoint := net.JoinHostPort(host, port)
+
 		var d net.Dialer
 
-		conn, err := d.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", "127.0.0.1", constants.ApidPort))
+		conn, err := d.DialContext(ctx, "tcp", endpoint)
 		if err != nil {
 			return err
 		}

@@ -8,6 +8,8 @@
 !pkg
 !website
 !tools
+!.custom-gcl.yml
+!.disvulncheck.yaml
 !.golangci.yml
 !.markdownlint.json
 !.textlintrc.json

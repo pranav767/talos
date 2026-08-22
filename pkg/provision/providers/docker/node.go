@@ -26,6 +26,10 @@ import (
 	"github.com/siderolabs/talos/pkg/provision"
 )
 
+// nodeStopTimeoutSeconds is how long to wait for a node container to gracefully shut
+// down (machined shutdown sequence) before Docker forcibly SIGKILLs it.
+const nodeStopTimeoutSeconds = 30
+
 type portMap struct {
 	exposedPorts network.PortSet
 	portBindings network.PortMap
@@ -268,6 +272,13 @@ func (p *provisioner) destroyNodes(ctx context.Context, clusterName string, opti
 		go func(ctr container.Summary) {
 			fmt.Fprintln(options.LogWriter, "destroying node", ctr.Names[0][1:])
 
+			// Give Talos a chance to gracefully shut down: SIGTERM triggers the shutdown
+			// sequence inside machined (stop services, kill children, unmount), which
+			// tears down the nested container runtimes and mounts in order.
+			if _, err := p.client.ContainerStop(ctx, ctr.ID, client.ContainerStopOptions{Timeout: new(nodeStopTimeoutSeconds)}); err != nil {
+				fmt.Fprintf(options.LogWriter, "error stopping node %s (continuing with force remove): %s\n", ctr.Names[0][1:], err)
+			}
+
 			_, err := p.client.ContainerRemove(ctx, ctr.ID, client.ContainerRemoveOptions{RemoveVolumes: true, Force: true})
 
 			errCh <- err
@@ -320,12 +331,10 @@ func genPortMap(portList []string, defaultHostIP string) (portMap, error) {
 		}
 
 		portSetRet[natPort] = struct{}{}
-		portMapRet[natPort] = []network.PortBinding{
-			{
-				HostIP:   hostAddr,
-				HostPort: hostPort,
-			},
-		}
+		portMapRet[natPort] = append(portMapRet[natPort], network.PortBinding{
+			HostIP:   hostAddr,
+			HostPort: hostPort,
+		})
 	}
 
 	return portMap{portSetRet, portMapRet}, nil

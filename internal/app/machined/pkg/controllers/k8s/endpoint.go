@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
@@ -105,18 +105,28 @@ func (ctrl *EndpointController) Run(ctx context.Context, r controller.Runtime, l
 }
 
 func (ctrl *EndpointController) watchEndpointsOnWorker(ctx context.Context, r controller.Runtime, logger *zap.Logger) error {
+	if err := r.UpdateInputs([]controller.Input{
+		{
+			Namespace: config.NamespaceName,
+			Type:      config.MachineTypeType,
+			ID:        optional.Some(config.MachineTypeID),
+			Kind:      controller.InputWeak,
+		},
+		{
+			Namespace: k8s.NamespaceName,
+			Type:      k8s.KubeletKubeconfigType,
+			ID:        optional.Some(k8s.KubeletKubeconfigID),
+			Kind:      controller.InputWeak,
+		},
+	}); err != nil {
+		return err
+	}
+
 	logger.Debug("waiting for kubelet client config", zap.String("file", constants.KubeletKubeconfig))
 
 	if err := conditions.WaitForKubeconfigReady(constants.KubeletKubeconfig).Wait(ctx); err != nil {
 		return err
 	}
-
-	client, err := kubernetes.NewClientFromKubeletKubeconfig()
-	if err != nil {
-		return fmt.Errorf("error building Kubernetes client: %w", err)
-	}
-
-	defer client.Close() //nolint:errcheck
 
 	r.QueueReconcile()
 
@@ -127,7 +137,22 @@ func (ctrl *EndpointController) watchEndpointsOnWorker(ctx context.Context, r co
 			return nil
 		}
 
-		if err = ctrl.watchKubernetesEndpointSlices(ctx, r, logger, client); err != nil {
+		// closure to capture the deferred close on client
+		watch := func() error {
+			client, err := kubernetes.NewClientFromKubeletKubeconfig()
+			if err != nil {
+				return fmt.Errorf("error building Kubernetes client: %w", err)
+			}
+
+			defer client.Close() //nolint:errcheck
+
+			if err = ctrl.watchKubernetesEndpointSlices(ctx, r, logger, client); err != nil {
+				return err
+			}
+
+			return nil
+		}
+		if err := watch(); err != nil {
 			return err
 		}
 	}
@@ -221,7 +246,8 @@ func (ctrl *EndpointController) updateEndpointsResource(
 
 	slices.SortFunc(addrs, func(a, b netip.Addr) int { return a.Compare(b) })
 
-	if err := safe.WriterModify(ctx,
+	if err := safe.WriterModify(
+		ctx,
 		r,
 		k8s.NewEndpoint(k8s.ControlPlaneNamespaceName, k8s.ControlPlaneAPIServerEndpointsID),
 		func(r *k8s.Endpoint) error {
@@ -303,7 +329,7 @@ func kubernetesEndpointSliceWatcher(ctx context.Context, logger *zap.Logger, cli
 	informerFactory := informers.NewSharedInformerFactoryWithOptions(
 		client.Clientset, constants.KubernetesInformerDefaultResyncPeriod,
 		informers.WithNamespace(corev1.NamespaceDefault),
-		informers.WithTweakListOptions(func(options *v1.ListOptions) {
+		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
 			options.FieldSelector = fields.OneTermEqualSelector("metadata.name", "kubernetes").String()
 		}),
 	)

@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,11 +22,14 @@ import (
 //go:embed testdata/timesyncconfig.yaml
 var expectedTimeSyncConfigDocument []byte
 
+//go:embed testdata/timesyncconfig_nts.yaml
+var expectedTimeSyncConfigNTSDocument []byte
+
 func TestTimeSyncConfigMarshalStability(t *testing.T) {
 	t.Parallel()
 
 	cfg := network.NewTimeSyncConfigV1Alpha1()
-	cfg.TimeEnabled = pointer.To(true)
+	cfg.TimeEnabled = new(true)
 	cfg.TimeBootTimeout = time.Minute
 	cfg.TimeNTP = &network.NTPConfig{
 		Servers: []string{"time.cloudflare.com"},
@@ -39,6 +41,23 @@ func TestTimeSyncConfigMarshalStability(t *testing.T) {
 	t.Log(string(marshaled))
 
 	assert.Equal(t, expectedTimeSyncConfigDocument, marshaled)
+}
+
+func TestTimeSyncConfigMarshalStabilityNTS(t *testing.T) {
+	t.Parallel()
+
+	cfg := network.NewTimeSyncConfigV1Alpha1()
+	cfg.TimeNTP = &network.NTPConfig{
+		Servers: []string{"time.cloudflare.com"},
+		UseNTS:  new(true),
+	}
+
+	marshaled, err := encoder.NewEncoder(cfg, encoder.WithComments(encoder.CommentsDisabled)).Encode()
+	require.NoError(t, err)
+
+	t.Log(string(marshaled))
+
+	assert.Equal(t, expectedTimeSyncConfigNTSDocument, marshaled)
 }
 
 func TestTimeSyncConfigUnmarshal(t *testing.T) {
@@ -55,12 +74,28 @@ func TestTimeSyncConfigUnmarshal(t *testing.T) {
 			MetaAPIVersion: "v1alpha1",
 			MetaKind:       network.TimeSyncKind,
 		},
-		TimeEnabled:     pointer.To(true),
+		TimeEnabled:     new(true),
 		TimeBootTimeout: time.Minute,
 		TimeNTP: &network.NTPConfig{
 			Servers: []string{"time.cloudflare.com"},
 		},
 	}, docs[0])
+}
+
+func TestTimeSyncConfigUnmarshalNTS(t *testing.T) {
+	t.Parallel()
+
+	provider, err := configloader.NewFromBytes(expectedTimeSyncConfigNTSDocument)
+	require.NoError(t, err)
+
+	docs := provider.Documents()
+	require.Len(t, docs, 1)
+
+	cfg, ok := docs[0].(*network.TimeSyncConfigV1Alpha1)
+	require.True(t, ok)
+
+	assert.True(t, cfg.UseNTS())
+	assert.Equal(t, []string{"time.cloudflare.com"}, cfg.Servers())
 }
 
 func TestTimeSyncValidate(t *testing.T) {
@@ -113,6 +148,31 @@ func TestTimeSyncValidate(t *testing.T) {
 
 				return cfg
 			},
+		},
+		{
+			name: "valid NTP config with NTS",
+			cfg: func() *network.TimeSyncConfigV1Alpha1 {
+				cfg := network.NewTimeSyncConfigV1Alpha1()
+				cfg.TimeNTP = &network.NTPConfig{
+					Servers: []string{"time.cloudflare.com"},
+					UseNTS:  new(true),
+				}
+
+				return cfg
+			},
+		},
+		{
+			name: "NTS with IP address is invalid",
+			cfg: func() *network.TimeSyncConfigV1Alpha1 {
+				cfg := network.NewTimeSyncConfigV1Alpha1()
+				cfg.TimeNTP = &network.NTPConfig{
+					Servers: []string{"192.0.2.1"},
+					UseNTS:  new(true),
+				}
+
+				return cfg
+			},
+			expectedError: `NTS requires hostnames, not IP addresses: "192.0.2.1"`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -177,7 +237,7 @@ func TestTimeSyncV1Alpha1Validate(t *testing.T) {
 			v1alpha1Cfg: &v1alpha1.Config{
 				MachineConfig: &v1alpha1.MachineConfig{
 					MachineTime: &v1alpha1.TimeConfig{
-						TimeDisabled: pointer.To(true),
+						TimeDisabled: new(true),
 					},
 				},
 			},
@@ -197,4 +257,61 @@ func TestTimeSyncV1Alpha1Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTimeSyncUseNTS(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil NTP config returns false", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := network.NewTimeSyncConfigV1Alpha1()
+		assert.False(t, cfg.UseNTS())
+	})
+
+	t.Run("PTP config returns false", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := network.NewTimeSyncConfigV1Alpha1()
+		cfg.TimePTP = &network.PTPConfig{
+			Devices: []string{"/dev/ptp0"},
+		}
+
+		assert.False(t, cfg.UseNTS())
+	})
+
+	t.Run("NTP config without NTS returns false", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := network.NewTimeSyncConfigV1Alpha1()
+		cfg.TimeNTP = &network.NTPConfig{
+			Servers: []string{"pool.ntp.org"},
+		}
+
+		assert.False(t, cfg.UseNTS())
+	})
+
+	t.Run("NTP config with NTS returns true", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := network.NewTimeSyncConfigV1Alpha1()
+		cfg.TimeNTP = &network.NTPConfig{
+			Servers: []string{"time.cloudflare.com"},
+			UseNTS:  new(true),
+		}
+
+		assert.True(t, cfg.UseNTS())
+	})
+
+	t.Run("NTP config with NTS explicitly false returns false", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := network.NewTimeSyncConfigV1Alpha1()
+		cfg.TimeNTP = &network.NTPConfig{
+			Servers: []string{"pool.ntp.org"},
+			UseNTS:  new(false),
+		}
+
+		assert.False(t, cfg.UseNTS())
+	})
 }

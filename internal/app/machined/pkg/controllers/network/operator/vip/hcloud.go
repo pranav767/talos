@@ -16,6 +16,7 @@ import (
 
 	"github.com/siderolabs/talos/pkg/download"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
+	"github.com/siderolabs/talos/pkg/machinery/version"
 )
 
 // HCloudHandler implements assignment and release of Virtual IPs using API.
@@ -33,7 +34,10 @@ type HCloudHandler struct {
 // NewHCloudHandler creates new NewEHCloudHandler.
 func NewHCloudHandler(logger *zap.Logger, vip string, spec network.VIPHCloudSpec) *HCloudHandler {
 	return &HCloudHandler{
-		client: hcloud.NewClient(hcloud.WithToken(spec.APIToken)),
+		client: hcloud.NewClient(
+			hcloud.WithToken(spec.APIToken),
+			hcloud.WithApplication(version.Name, version.Tag),
+		),
 
 		logger: logger,
 
@@ -62,12 +66,14 @@ func (handler *HCloudHandler) Acquire(ctx context.Context) error {
 
 		oldDeviceID := findServerByAlias(serverList, handler.networkID, handler.vip)
 		if oldDeviceID != 0 {
-			handler.logger.Info("trying to remove previous Hetzner Cloud IP alias",
+			handler.logger.Info(
+				"trying to remove previous Hetzner Cloud IP alias",
 				zap.String("vip", handler.vip), zap.Int64("device_id", oldDeviceID),
 				zap.Int64("network_id", handler.networkID),
 			)
 
-			action, _, err = handler.client.Server.ChangeAliasIPs(ctx,
+			action, _, err = handler.client.Server.ChangeAliasIPs(
+				ctx,
 				&hcloud.Server{ID: oldDeviceID},
 				hcloud.ServerChangeAliasIPsOpts{
 					Network:  &hcloud.Network{ID: handler.networkID},
@@ -172,7 +178,10 @@ func GetNetworkAndDeviceIDs(ctx context.Context, spec *network.VIPHCloudSpec, vi
 		return fmt.Errorf("error getting instance-id id: %w", err)
 	}
 
-	client := hcloud.NewClient(hcloud.WithToken(spec.APIToken))
+	client := hcloud.NewClient(
+		hcloud.WithToken(spec.APIToken),
+		hcloud.WithApplication(version.Name, version.Tag),
+	)
 
 	server, _, err := client.Server.GetByID(ctx, spec.DeviceID)
 	if err != nil {

@@ -65,7 +65,6 @@ func (l *Local) GetConnection(ctx context.Context, _ string) (context.Context, *
 			grpc.MaxCallRecvMsgSize(constants.GRPCMaxMessageSize),
 			grpc.ForceCodecV2(proxy.Codec()),
 		),
-		grpc.WithSharedWriteBuffer(true),
 		grpc.WithNoProxy(),
 	)
 
@@ -80,4 +79,19 @@ func (l *Local) AppendInfo(_ bool, resp []byte) ([]byte, error) {
 // BuildError is called to convert error from upstream into response field.
 func (l *Local) BuildError(bool, error) ([]byte, error) {
 	return nil, nil
+}
+
+// Close the backend connection.
+func (l *Local) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.conn == nil {
+		return nil
+	}
+
+	err := l.conn.Close()
+	l.conn = nil
+
+	return err
 }

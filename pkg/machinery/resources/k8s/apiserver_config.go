@@ -20,6 +20,9 @@ const APIServerConfigType = resource.Type("APIServerConfigs.kubernetes.talos.dev
 // APIServerConfigID is a singleton resource ID for APIServerConfig.
 const APIServerConfigID = resource.ID(APIServerID)
 
+// FinalAPIServerConfigID is the ID for the final kube-apiserver configuration, which is produced by merging user-provided configuration with defaults.
+const FinalAPIServerConfigID = resource.ID(FinalPrefix + APIServerID)
+
 // APIServerConfig represents configuration for kube-apiserver.
 type APIServerConfig = typed.Resource[APIServerConfigSpec, APIServerConfigExtension]
 
@@ -45,24 +48,35 @@ type Resources struct {
 //
 //gotagsrewrite:gen
 type APIServerConfigSpec struct {
-	Image                string            `yaml:"image" protobuf:"1"`
-	CloudProvider        string            `yaml:"cloudProvider" protobuf:"2"`
-	ControlPlaneEndpoint string            `yaml:"controlPlaneEndpoint" protobuf:"3"`
-	EtcdServers          []string          `yaml:"etcdServers" protobuf:"4"`
-	LocalPort            int               `yaml:"localPort" protobuf:"5"`
-	ServiceCIDRs         []string          `yaml:"serviceCIDR" protobuf:"6"`
-	ExtraArgs            map[string]string `yaml:"extraArgs" protobuf:"7"`
-	ExtraVolumes         []ExtraVolume     `yaml:"extraVolumes" protobuf:"8"`
-	EnvironmentVariables map[string]string `yaml:"environmentVariables" protobuf:"9"`
-	AdvertisedAddress    string            `yaml:"advertisedAddress" protobuf:"11"`
-	Resources            Resources         `yaml:"resources" protobuf:"12"`
+	Image                   string               `yaml:"image" protobuf:"1"`
+	CloudProvider           string               `yaml:"cloudProvider" protobuf:"2"`
+	ControlPlaneEndpoint    string               `yaml:"controlPlaneEndpoint" protobuf:"3"`
+	EtcdServers             []string             `yaml:"etcdServers" protobuf:"4"`
+	LocalPort               int                  `yaml:"localPort" protobuf:"5"`
+	ServiceCIDRs            []string             `yaml:"serviceCIDR" protobuf:"6"`
+	ExtraArgs               map[string]ArgValues `yaml:"extraArgs" protobuf:"13"`
+	Args                    []string             `yaml:"args,omitempty" protobuf:"16"`
+	ExtraVolumes            []ExtraVolume        `yaml:"extraVolumes" protobuf:"8"`
+	EnvironmentVariables    map[string]string    `yaml:"environmentVariables" protobuf:"9"`
+	AdvertisedAddress       string               `yaml:"advertisedAddress" protobuf:"11"`
+	Resources               Resources            `yaml:"resources" protobuf:"12"`
+	StartupProbesEnabled    bool                 `yaml:"startupProbesEnabled" protobuf:"14"`
+	UseAuthenticationConfig bool                 `yaml:"useAuthenticationConfig" protobuf:"15"`
+}
+
+// ArgValues represents values for a command line argument which can be specified multiple times.
+//
+//gotagsrewrite:gen
+type ArgValues struct {
+	Values []string `yaml:"values" protobuf:"1"`
 }
 
 // NewAPIServerConfig returns new APIServerConfig resource.
-func NewAPIServerConfig() *APIServerConfig {
+func NewAPIServerConfig(id string) *APIServerConfig {
 	return typed.NewResource[APIServerConfigSpec, APIServerConfigExtension](
-		resource.NewMetadata(ControlPlaneNamespaceName, APIServerConfigType, APIServerConfigID, resource.VersionUndefined),
-		APIServerConfigSpec{})
+		resource.NewMetadata(ControlPlaneNamespaceName, APIServerConfigType, id, resource.VersionUndefined),
+		APIServerConfigSpec{},
+	)
 }
 
 // APIServerConfigExtension defines APIServerConfig resource definition.
@@ -73,6 +87,7 @@ func (APIServerConfigExtension) ResourceDefinition() meta.ResourceDefinitionSpec
 	return meta.ResourceDefinitionSpec{
 		Type:             APIServerConfigType,
 		DefaultNamespace: ControlPlaneNamespaceName,
+		Sensitivity:      meta.Sensitive,
 	}
 }
 

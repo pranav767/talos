@@ -35,6 +35,12 @@ case "${WITH_UEFI:-none}" in
     ;;
 esac
 
+case "${WITH_BAD_RTC:-none}" in
+  true)
+    QEMU_FLAGS+=("--bad-rtc")
+    ;;
+esac
+
 case "${WITH_VIRTUAL_IP:-false}" in
   true)
     QEMU_FLAGS+=("--use-vip")
@@ -58,6 +64,18 @@ esac
 case "${WITH_KUBESPAN:-false}" in
   true)
     QEMU_FLAGS+=("--with-kubespan")
+    ;;
+esac
+
+case "${WITH_BGP:-false}" in
+  true)
+    QEMU_FLAGS+=("--with-bgp")
+    ;;
+esac
+
+case "${WITH_BGP_CLOS:-false}" in
+  true)
+    QEMU_FLAGS+=("--with-bgp-clos")
     ;;
 esac
 
@@ -106,7 +124,7 @@ case "${USE_DISK_IMAGE:-false}" in
   false)
     ;;
   *)
-    QEMU_FLAGS+=("--disk-image-path=_out/metal-amd64.raw.zst")
+    QEMU_FLAGS+=("--disk-image-path=_out/metal-amd64.raw.zst" "--skip-unattended-install-config")
     ;;
 esac
 
@@ -162,14 +180,6 @@ case "${WITH_CONFIG_PATCH_WORKER:-false}" in
     ;;
 esac
 
-case "${WITH_SKIP_K8S_NODE_READINESS_CHECK:-false}" in
-  false)
-    ;;
-  *)
-    QEMU_FLAGS+=("--skip-k8s-node-readiness-check")
-    ;;
-esac
-
 case "${WITH_CUSTOM_CNI:-none}" in
   false)
     ;;
@@ -184,6 +194,15 @@ case "${WITH_TRUSTED_BOOT_ISO:-false}" in
   *)
     INSTALLER_IMAGE=${INSTALLER_IMAGE}-amd64-secureboot
     QEMU_FLAGS+=("--iso-path=_out/metal-amd64-secureboot.iso" "--with-tpm2" "--encrypt-ephemeral" "--encrypt-state" "--encrypt-user-volumes" "--disk-encryption-key-types=tpm")
+    ;;
+esac
+
+case "${WITH_TRUSTED_BOOT_DISK_IMAGE:-false}" in
+  false)
+    ;;
+  *)
+    INSTALLER_IMAGE=${INSTALLER_IMAGE}-amd64-secureboot
+    QEMU_FLAGS+=("--disk-image-path=_out/metal-amd64-secureboot.raw.zst" "--with-tpm2" "--encrypt-ephemeral" "--encrypt-state" "--encrypt-user-volumes" "--disk-encryption-key-types=tpm")
     ;;
 esac
 
@@ -238,6 +257,31 @@ case "${WITH_4K_DISK:-false}" in
     ;;
 esac
 
+case "${WITH_4K_DISK_IMAGE:-false}" in
+  false)
+    ;;
+  *)
+    # build a disk image with 4K sector size
+    make image-metal-4k PLATFORM=linux/amd64
+
+    QEMU_FLAGS+=("--disk-image-path=_out/metal-amd64.raw.zst" "--skip-injecting-config" "--with-apply-config")
+    ;;
+esac
+
+case "${WITH_EPHEMERAL_NODE:-false}" in
+  false)
+    ;;
+  *)
+    # Fully ephemeral node: STATE and EPHEMERAL on tmpfs. Forced single-node cluster.
+    QEMU_FLAGS+=("--config-patch-control-plane=@hack/test/patches/ephemeral-memory.yaml")
+    QEMU_CONTROLPLANES=1
+    QEMU_WORKERS=0
+    QEMU_MEMORY_CONTROLPLANES="${QEMU_MEMORY_CONTROLPLANES:-6144}"
+    EXTRA_TEST_ARGS="${EXTRA_TEST_ARGS:-} -talos.ephemeral-node"
+    export EXTRA_TEST_ARGS
+    ;;
+esac
+
 case "${WITH_UKI_BOOT:-false}" in
   false)
     ;;
@@ -252,6 +296,14 @@ case "${WITH_USER_DISK:-false}" in
   *)
     QEMU_FLAGS+=("--user-volumes=extra:350MB")
     QEMU_FLAGS+=("--user-volumes=p1:350MB:p2:350MB")
+    ;;
+esac
+
+case "${WITH_TALOS_VERSION:-none}" in
+  none)
+    ;;
+  *)
+    QEMU_FLAGS+=("--talos-version=${WITH_TALOS_VERSION}")
     ;;
 esac
 
@@ -275,7 +327,7 @@ case "${WITH_AIRGAPPED:-false}" in
     QEMU_FLAGS+=("--image-cache-tls-key-file=${TMP}/image-cache-tls.key")
     ;;
   http-proxy)
-    "${TALOSCTL}" debug air-gapped --advertised-address 172.20.1.1 > /tmp/airgapped.log 2>&1 &
+    "${TALOSCTL}" debug-tool air-gapped --advertised-address 172.20.1.1 > /tmp/airgapped.log 2>&1 &
     sleep 5 # wait for the air-gapped server to start
     cat air-gapped-patch.yaml
     mv air-gapped-patch.yaml "${TMP}/air-gapped-patch.yaml"
@@ -283,7 +335,7 @@ case "${WITH_AIRGAPPED:-false}" in
     QEMU_FLAGS+=("--config-patch=@${TMP}/air-gapped-patch.yaml")
     ;;
   secure-http-proxy)
-    "${TALOSCTL}" debug air-gapped --advertised-address 172.20.1.1 --use-secure-proxy > /tmp/airgapped-secure.log 2>&1 &
+    "${TALOSCTL}" debug-tool air-gapped --advertised-address 172.20.1.1 --use-secure-proxy > /tmp/airgapped-secure.log 2>&1 &
     sleep 5 # wait for the air-gapped server to start
     cat air-gapped-patch.yaml
     mv air-gapped-patch.yaml "${TMP}/air-gapped-patch.yaml"
@@ -291,7 +343,7 @@ case "${WITH_AIRGAPPED:-false}" in
     QEMU_FLAGS+=("--config-patch=@${TMP}/air-gapped-patch.yaml")
     ;;
   https-reverse-proxy)
-    "${TALOSCTL}" debug air-gapped --advertised-address 172.20.1.1 --inject-http-proxy=false --https-reverse-proxy-target=https://registry.dev.siderolabs.io > /tmp/airgapped-reverse-proxy.log 2>&1 &
+    "${TALOSCTL}" debug-tool air-gapped --advertised-address 172.20.1.1 --inject-http-proxy=false --https-reverse-proxy-target=https://registry.dev.siderolabs.io > /tmp/airgapped-reverse-proxy.log 2>&1 &
     sleep 5 # wait for the air-gapped server to start
     cat air-gapped-patch.yaml
     mv air-gapped-patch.yaml "${TMP}/air-gapped-patch.yaml"
@@ -309,18 +361,19 @@ function create_cluster {
     --provisioner="${PROVISIONER}" \
     --name="${CLUSTER_NAME}" \
     --kubernetes-version="${KUBERNETES_VERSION}" \
-    --controlplanes=3 \
+    --controlplanes="${QEMU_CONTROLPLANES:-3}" \
     --workers="${QEMU_WORKERS:-2}" \
     --disk="${QEMU_SYSTEM_DISK_SIZE:-15360}" \
+    --primary-disks="${QEMU_SYSTEM_DISKS:-1}" \
     --extra-disks="${QEMU_EXTRA_DISKS:-0}" \
     --extra-disks-size="${QEMU_EXTRA_DISKS_SIZE:-6144}" \
     --extra-disks-drivers="${QEMU_EXTRA_DISKS_DRIVERS:-}" \
     --extra-disks-serials="${QEMU_EXTRA_DISKS_SERIALS:-}" \
     --extra-disks-tags="${QEMU_EXTRA_DISKS_TAGS:-}" \
     --mtu=1430 \
-    --memory="${QEMU_MEMORY_CONTROLPLANES:-2048}" \
+    --memory="${QEMU_MEMORY_CONTROLPLANES:-4096}" \
     --memory-workers="${QEMU_MEMORY_WORKERS:-2048}" \
-    --cpus="${QEMU_CPUS:-2}" \
+    --cpus="${QEMU_CPUS:-4}" \
     --cpus-workers="${QEMU_CPUS_WORKERS:-2}" \
     --cidr=172.20.1.0/24 \
     --install-image="${INSTALLER_IMAGE}" \
@@ -364,6 +417,10 @@ case "${TEST_MODE:-default}" in
 
     if [[ ${QEMU_MEMORY_WORKERS:-2048} -gt 1024 ]]; then
         run_kubernetes_integration_test
+    fi
+
+    if [ "${TEST_MODE:-default}" = "network-policy" ]; then
+        run_kubernetes_conformance_test network-policy
     fi
 
     if [ "${WITH_TEST:-none}" != "none" ]; then

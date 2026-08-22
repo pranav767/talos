@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 
+	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/internal/trigger"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/network/watch"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/runtime"
 	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
@@ -45,7 +46,8 @@ func (ctrl *LinkAliasSpecController) Outputs() []controller.Output {
 //nolint:gocyclo,cyclop
 func (ctrl *LinkAliasSpecController) Run(ctx context.Context, r controller.Runtime, logger *zap.Logger) error {
 	// wait for udevd to be healthy, which implies that all link renames are done
-	if err := runtime.WaitForDevicesReady(ctx, r,
+	if err := runtime.WaitForDevicesReady(
+		ctx, r,
 		[]controller.Input{
 			{
 				Namespace: network.NamespaceName,
@@ -58,7 +60,7 @@ func (ctrl *LinkAliasSpecController) Run(ctx context.Context, r controller.Runti
 	}
 
 	// watch link changes as some routes might need to be re-applied if the link appears
-	watcher, err := watch.NewRtNetlink(watch.NewDefaultRateLimitedTrigger(ctx, r), unix.RTMGRP_LINK)
+	watcher, err := watch.NewRtNetlink(trigger.NewDefaultRateLimitedTrigger(ctx, r), unix.RTMGRP_LINK)
 	if err != nil {
 		return err
 	}
@@ -107,8 +109,13 @@ func (ctrl *LinkAliasSpecController) Run(ctx context.Context, r controller.Runti
 				continue
 			}
 
-			if link.Attributes.Info != nil || nethelpers.LinkType(link.Type) != nethelpers.LinkEther {
-				// skip non-physical links
+			if nethelpers.LinkType(link.Type) != nethelpers.LinkEther {
+				// skip non-physical links: physical links have type==ether && kind == ""
+				continue
+			}
+
+			if linkKind := pointer.SafeDeref(link.Attributes.Info).Kind; linkKind != "" {
+				// skip non-physical links, check for kind
 				continue
 			}
 
@@ -117,7 +124,8 @@ func (ctrl *LinkAliasSpecController) Run(ctx context.Context, r controller.Runti
 
 			if !shouldHaveAlias && currentAlias != "" {
 				// should not have alias, but has one - remove it
-				logger.Info("removing link alias",
+				logger.Info(
+					"removing link alias",
 					zap.String("link", link.Attributes.Name),
 					zap.String("alias", currentAlias),
 				)
@@ -125,14 +133,15 @@ func (ctrl *LinkAliasSpecController) Run(ctx context.Context, r controller.Runti
 				if err = conn.Link.Set(&rtnetlink.LinkMessage{
 					Index: link.Index,
 					Attributes: &rtnetlink.LinkAttributes{
-						Alias: pointer.To(""),
+						Alias: new(""),
 					},
 				}); err != nil {
 					multiErr = multierror.Append(multiErr, fmt.Errorf("error removing alias %q from link %q: %w", currentAlias, link.Attributes.Name, err))
 				}
 			} else if shouldHaveAlias && currentAlias != expectedAlias {
 				// should have alias, but doesn't have it or it's different - set it
-				logger.Info("setting link alias",
+				logger.Info(
+					"setting link alias",
 					zap.String("link", link.Attributes.Name),
 					zap.String("alias", expectedAlias),
 				)
@@ -140,7 +149,7 @@ func (ctrl *LinkAliasSpecController) Run(ctx context.Context, r controller.Runti
 				if err = conn.Link.Set(&rtnetlink.LinkMessage{
 					Index: link.Index,
 					Attributes: &rtnetlink.LinkAttributes{
-						Alias: pointer.To(expectedAlias),
+						Alias: new(expectedAlias),
 					},
 				}); err != nil {
 					multiErr = multierror.Append(multiErr, fmt.Errorf("error setting alias %q on link %q: %w", expectedAlias, link.Attributes.Name, err))

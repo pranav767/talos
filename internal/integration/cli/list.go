@@ -30,7 +30,7 @@ func (suite *ListSuite) SuiteName() string {
 	return "cli.ListSuite"
 }
 
-// TestSuccess runs comand with success.
+// TestSuccess runs command with success.
 func (suite *ListSuite) TestSuccess() {
 	suite.RunCLI([]string{"list", "--nodes", suite.RandomDiscoveredNodeInternalIP(), "/etc"},
 		base.StdoutShouldMatch(regexp.MustCompile(`os-release`)))
@@ -51,7 +51,7 @@ func (suite *ListSuite) TestDepth() {
 
 	if stdout, _ := suite.RunCLI([]string{"get", "imagecacheconfig", "--nodes", node, "--output", "yaml"}); strings.Contains(stdout, "ready") {
 		// Image cache paths parts are longer
-		maxSeps = 9
+		maxSeps = 8
 	}
 
 	// checks that enough separators are encountered in the output
@@ -66,7 +66,7 @@ func (suite *ListSuite) TestDepth() {
 		{separators: 0, flags: []string{"--depth=1"}},
 		{separators: 1, flags: []string{"--depth=2"}},
 		{separators: 2, flags: []string{"--depth=3"}},
-		{separators: maxSeps, flags: []string{"--recurse=true"}},
+		{separators: -maxSeps, flags: []string{"--recurse=true"}}, // negative means "at least"
 	} {
 		cmdFn := suite.MakeCMDFn(slices.Insert(test.flags, 0, "list", "--nodes", node, "/system"))
 
@@ -83,15 +83,14 @@ func runAndCheck(t *testing.T, expectedSeparators int, cmdFn func() *exec.Cmd, f
 
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
 	assert.Greater(t, len(lines), 2)
-	assert.Equal(t, []string{"NODE", "NAME"}, strings.Fields(lines[0]))
-	assert.Equal(t, []string{"."}, strings.Fields(lines[1])[1:])
+	assert.Equal(t, ".", lines[0])
 
 	var maxActualSeparators int
 
-	for _, line := range lines[2:] {
-		actualSeparators := strings.Count(strings.Fields(line)[1], string(os.PathSeparator))
+	for _, line := range lines[1:] {
+		actualSeparators := strings.Count(line, string(os.PathSeparator))
 
-		if !assert.LessOrEqual(
+		if expectedSeparators >= 0 && !assert.LessOrEqual(
 			t,
 			actualSeparators,
 			expectedSeparators,
@@ -105,14 +104,25 @@ func runAndCheck(t *testing.T, expectedSeparators int, cmdFn func() *exec.Cmd, f
 		maxActualSeparators = max(maxActualSeparators, actualSeparators)
 	}
 
-	assert.Equal(
-		t,
-		expectedSeparators,
-		maxActualSeparators,
-		"not enough separators, \nflags: %s\nlines:\n%s",
-		strings.Join(flags, " "),
-		stdout,
-	)
+	if expectedSeparators < 0 {
+		assert.LessOrEqual(
+			t,
+			-expectedSeparators,
+			maxActualSeparators,
+			"not enough separators, \nflags: %s\nlines:\n%s",
+			strings.Join(flags, " "),
+			stdout,
+		)
+	} else {
+		assert.Equal(
+			t,
+			expectedSeparators,
+			maxActualSeparators,
+			"not enough separators, \nflags: %s\nlines:\n%s",
+			strings.Join(flags, " "),
+			stdout,
+		)
+	}
 }
 
 func init() {

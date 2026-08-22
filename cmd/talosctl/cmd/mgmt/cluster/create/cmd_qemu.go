@@ -5,7 +5,6 @@
 package create
 
 import (
-	"context"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -14,14 +13,14 @@ import (
 	"github.com/siderolabs/talos/cmd/talosctl/cmd/constants"
 	"github.com/siderolabs/talos/cmd/talosctl/cmd/mgmt/cluster/create/clusterops"
 	"github.com/siderolabs/talos/cmd/talosctl/cmd/mgmt/cluster/create/clusterops/configmaker/preset"
-	"github.com/siderolabs/talos/pkg/cli"
 	"github.com/siderolabs/talos/pkg/provision/providers"
 )
 
 type presetOptions struct {
-	schematicID     string
-	imageFactoryURL string
-	presets         []string
+	schematicID      string
+	imageFactoryURL  string
+	imageFactoryAuth string
+	presets          []string
 }
 
 func init() {
@@ -40,8 +39,9 @@ func init() {
 		qemu := pflag.NewFlagSet("qemu", pflag.PanicOnError)
 
 		addDisksFlag(qemu, &qOps.Disks)
-		qemu.StringVar(&presetOptions.schematicID, "schematic-id", "", "image factory schematic id (defaults to an empty schematic)")
-		qemu.StringVar(&presetOptions.imageFactoryURL, "image-factory-url", constants.ImageFactoryURL, "image factory url")
+		qemu.StringVar(&presetOptions.schematicID, "schematic-id", "", "Image Factory schematic id (defaults to an empty schematic)")
+		qemu.StringVar(&presetOptions.imageFactoryURL, "image-factory-url", constants.ImageFactoryURL, "Image Factory url")
+		qemu.StringVar(&presetOptions.imageFactoryAuth, "image-factory-auth", "", "username:password for authenticating with the Image Factory")
 		qemu.StringSliceVar(&presetOptions.presets, "presets", []string{preset.ISO{}.Name()}, "list of presets to apply")
 
 		return qemu
@@ -65,14 +65,12 @@ func init() {
 		Long:  cmdDescription.String(),
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return cli.WithContext(context.Background(), func(ctx context.Context) error {
-				provisioner, err := providers.Factory(ctx, providers.QemuProviderName)
-				if err != nil {
-					return err
-				}
+			provisioner, err := providers.Factory(cmd.Context(), providers.QemuProviderName)
+			if err != nil {
+				return err
+			}
 
-				return createQemuCluster(ctx, qOps, cOps, presetOptions, provisioner)
-			})
+			return createQemuCluster(cmd.Context(), qOps, cOps, presetOptions, provisioner)
 		},
 	}
 

@@ -115,7 +115,7 @@ func (ctrl *RouteConfigController) Run(ctx context.Context, r controller.Runtime
 		}
 
 		if cfg != nil {
-			if err = ctrl.apply(ctx, r, ctrl.processMachineConfig(cfg.Config().NetworkCommonLinkConfigs())); err != nil {
+			if err = ctrl.apply(ctx, r, ctrl.processMachineConfig(cfg.Config().NetworkCommonLinkConfigs(), cfg.Config().NetworkBlackholeRouteConfigs())); err != nil {
 				return fmt.Errorf("error applying machine configuration routes: %w", err)
 			}
 		}
@@ -301,7 +301,8 @@ func (ctrl *RouteConfigController) processDevicesConfiguration(logger *zap.Logge
 	return routes
 }
 
-func (ctrl *RouteConfigController) processMachineConfig(linkConfigs []cfg.NetworkCommonLinkConfig) (routes []network.RouteSpecSpec) {
+//nolint:gocyclo
+func (ctrl *RouteConfigController) processMachineConfig(linkConfigs []cfg.NetworkCommonLinkConfig, blackholeRouteConfigs []cfg.NetworkBlackholeRouteConfig) (routes []network.RouteSpecSpec) {
 	for _, linkConfig := range linkConfigs {
 		for _, spec := range linkConfig.Routes() {
 			var route network.RouteSpecSpec
@@ -327,7 +328,7 @@ func (ctrl *RouteConfigController) processMachineConfig(linkConfigs []cfg.Networ
 				route.Family = nethelpers.FamilyInet4
 			}
 
-			route.Table = nethelpers.TableMain
+			route.Table = spec.Table().ValueOr(nethelpers.TableMain)
 			route.Protocol = nethelpers.ProtocolStatic
 			route.OutLinkName = linkConfig.Name()
 			route.ConfigLayer = network.ConfigMachineConfiguration
@@ -340,6 +341,35 @@ func (ctrl *RouteConfigController) processMachineConfig(linkConfigs []cfg.Networ
 
 			routes = append(routes, route)
 		}
+	}
+
+	for _, blackholeRouteConfig := range blackholeRouteConfigs {
+		destination, err := netip.ParsePrefix(blackholeRouteConfig.Name())
+		if err != nil {
+			// validated in the machine config
+			continue
+		}
+
+		family := nethelpers.FamilyInet4
+		outLinkName := ""
+
+		if destination.Addr().Is6() {
+			family = nethelpers.FamilyInet6
+			outLinkName = "lo"
+		}
+
+		route := network.RouteSpecSpec{
+			Destination: destination,
+			Family:      family,
+			Table:       nethelpers.TableMain,
+			Protocol:    nethelpers.ProtocolStatic,
+			Type:        nethelpers.TypeBlackhole,
+			OutLinkName: outLinkName,
+			ConfigLayer: network.ConfigMachineConfiguration,
+			Priority:    blackholeRouteConfig.Metric().ValueOr(network.DefaultRouteMetric),
+		}
+
+		routes = append(routes, route)
 	}
 
 	return routes

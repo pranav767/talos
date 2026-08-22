@@ -7,12 +7,12 @@ description: Talos gRPC API reference.
 {{range .Files}}
 {{$file_name := .Name}}- [{{.Name}}](#{{.Name}})
   {{- if .Messages }}
-  {{range .Messages}}  - [{{.LongName}}](#{{.FullName}})
-  {{end}}
+  {{range .Messages}}{{if not (index .Options "deprecated")}}  - [{{.LongName}}](#{{.FullName}})
+  {{end}}{{end}}
   {{- end -}}
   {{- if .Enums }}
-  {{range .Enums}}  - [{{.LongName}}](#{{.FullName}})
-  {{end}}
+  {{range .Enums}}{{if not (index .Options "deprecated")}}  - [{{.LongName}}](#{{.FullName}})
+  {{end}}{{end}}
   {{- end -}}
   {{- if .Extensions }}
   {{range (list .Extensions | uniq)}}  - [File-level Extensions](#{{$file_name}}-extensions)
@@ -33,7 +33,7 @@ description: Talos gRPC API reference.
 ## {{.Name}}
 {{.Description}}
 
-{{range .Messages}}
+{{range .Messages}}{{if not (index .Options "deprecated")}}
 <a name="{{.FullName}}"></a>
 
 ### {{.LongName}}
@@ -43,7 +43,7 @@ description: Talos gRPC API reference.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 {{range .Fields -}}
-  | {{.Name}} | [{{.LongType}}](#{{.FullType}}) | {{.Label}} | {{if (index .Options "deprecated"|default false)}}**Deprecated.** {{end}}{{nobr .Description}}{{if .DefaultValue}} Default: {{.DefaultValue}}{{end}} |
+  | {{.Name}} | [{{.LongType}}](#{{.FullType}}) | {{.Label}} | {{if (index .Options "deprecated"|default false)}}**Deprecated.** {{end}}{{nobr .Description | replace "\n\n" "<br><br>"}}{{if .DefaultValue}} Default: {{.DefaultValue}}{{end}} |
 {{end}}
 {{end}}
 
@@ -51,13 +51,13 @@ description: Talos gRPC API reference.
 | Extension | Type | Base | Number | Description |
 | --------- | ---- | ---- | ------ | ----------- |
 {{range .Extensions -}}
-  | {{.Name}} | {{.LongType}} | {{.ContainingLongType}} | {{.Number}} | {{nobr .Description}}{{if .DefaultValue}} Default: {{.DefaultValue}}{{end}} |
+  | {{.Name}} | {{.LongType}} | {{.ContainingLongType}} | {{.Number}} | {{nobr .Description | replace "\n\n" "<br><br>"}}{{if .DefaultValue}} Default: {{.DefaultValue}}{{end}} |
 {{end}}
 {{end}}
-
+{{end}}
 {{end}} <!-- end messages -->
 
-{{range .Enums}}
+{{range .Enums}}{{if not (index .Options "deprecated")}}
 <a name="{{.FullName}}"></a>
 
 ### {{.LongName}}
@@ -66,10 +66,10 @@ description: Talos gRPC API reference.
 | Name | Number | Description |
 | ---- | ------ | ----------- |
 {{range .Values -}}
-  | {{.Name}} | {{.Number}} | {{nobr .Description}} |
+  | {{.Name}} | {{.Number}} | {{nobr .Description | replace "\n\n" "<br><br>"}} |
 {{end}}
 
-{{end}} <!-- end enums -->
+{{end}}{{end}} <!-- end enums -->
 
 {{if .HasExtensions}}
 <a name="{{$file_name}}-extensions"></a>
@@ -78,7 +78,7 @@ description: Talos gRPC API reference.
 | Extension | Type | Base | Number | Description |
 | --------- | ---- | ---- | ------ | ----------- |
 {{range .Extensions -}}
-  | {{.Name}} | {{.LongType}} | {{.ContainingLongType}} | {{.Number}} | {{nobr .Description}}{{if .DefaultValue}} Default: `{{.DefaultValue}}`{{end}} |
+  | {{.Name}} | {{.LongType}} | {{.ContainingLongType}} | {{.Number}} | {{nobr .Description | replace "\n\n" "<br><br>"}}{{if .DefaultValue}} Default: `{{.DefaultValue}}`{{end}} |
 {{end}}
 {{end}} <!-- end HasExtensions -->
 
@@ -91,7 +91,7 @@ description: Talos gRPC API reference.
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
 {{range .Methods -}}
-  | {{.Name}} | [{{.RequestLongType}}](#{{.RequestFullType}}){{if .RequestStreaming}} stream{{end}} | [{{.ResponseLongType}}](#{{.ResponseFullType}}){{if .ResponseStreaming}} stream{{end}} | {{nobr .Description}} |
+  | {{.Name}} | [{{.RequestLongType}}](#{{.RequestFullType}}){{if .RequestStreaming}} stream{{end}} | [{{.ResponseLongType}}](#{{.ResponseFullType}}){{if .ResponseStreaming}} stream{{end}} | {{nobr .Description | replace "\n\n" "<br><br>"}} |
 {{end}}
 {{end}} <!-- end services -->
 

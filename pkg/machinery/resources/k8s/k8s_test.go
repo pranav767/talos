@@ -31,13 +31,16 @@ func TestRegisterResource(t *testing.T) {
 		&k8s.APIServerConfig{},
 		&k8s.KubePrismEndpoints{},
 		&k8s.AuditPolicyConfig{},
+		&k8s.AuthenticationConfig{},
 		&k8s.ConfigStatus{},
 		&k8s.ControllerManagerConfig{},
 		&k8s.Endpoint{},
 		&k8s.ExtraManifestsConfig{},
 		&k8s.KubeletConfig{},
+		&k8s.KubeletKubeconfig{},
 		&k8s.KubeletLifecycle{},
 		&k8s.KubeletSpec{},
+		&k8s.KubeletStatus{},
 		&k8s.KubePrismStatuses{},
 		&k8s.KubePrismConfig{},
 		&k8s.ManifestStatus{},
@@ -64,7 +67,7 @@ func TestKubeletConfig(t *testing.T) {
 	cfg.TypedSpec().Image = "kubelet:v1.0.0"
 	cfg.TypedSpec().ClusterDNS = []string{"10.96.0.10"}
 	cfg.TypedSpec().ClusterDomain = "cluster.local"
-	cfg.TypedSpec().ExtraArgs = map[string]string{"foo": "bar"}
+	cfg.TypedSpec().ExtraArgs = map[string]k8s.ArgValues{"foo": {Values: []string{"bar"}}}
 	cfg.TypedSpec().ExtraMounts = []specs.Mount{
 		{
 			Destination: "/tmp",

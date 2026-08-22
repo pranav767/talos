@@ -15,13 +15,14 @@ import (
 	"github.com/cosi-project/runtime/pkg/controller"
 	"github.com/cosi-project/runtime/pkg/safe"
 	"github.com/cosi-project/runtime/pkg/state"
+	"github.com/siderolabs/gen/optional"
 	"github.com/siderolabs/go-kubernetes/kubernetes/compatibility"
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sjson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	apiserverv1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
 	auditv1 "k8s.io/apiserver/pkg/apis/audit/v1"
-	schedulerv1 "k8s.io/kube-scheduler/config/v1"
 
 	"github.com/siderolabs/talos/internal/pkg/selinux"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
@@ -56,7 +57,13 @@ func (ctrl *RenderConfigsStaticPodController) Inputs() []controller.Input {
 		},
 		{
 			Namespace: k8s.ControlPlaneNamespaceName,
+			Type:      k8s.AuthenticationConfigType,
+			Kind:      controller.InputWeak,
+		},
+		{
+			Namespace: k8s.ControlPlaneNamespaceName,
 			Type:      k8s.SchedulerConfigType,
+			ID:        optional.Some(k8s.FinalSchedulerConfigID),
 			Kind:      controller.InputWeak,
 		},
 	}
@@ -118,7 +125,13 @@ func (ctrl *RenderConfigsStaticPodController) Run(ctx context.Context, r control
 
 		kubeAPIServerVersion := compatibility.VersionFromImageRef(authorizerConfig.Image)
 
-		kubeSchedulerRes, err := safe.ReaderGetByID[*k8s.SchedulerConfig](ctx, r, k8s.SchedulerConfigID)
+		// authentication config is optional, so we don't return an error if it is not found
+		authenticationConfigRes, err := safe.ReaderGetByID[*k8s.AuthenticationConfig](ctx, r, k8s.AuthenticationConfigID)
+		if err != nil && !state.IsNotFoundError(err) {
+			return fmt.Errorf("error getting authentication config resource: %w", err)
+		}
+
+		kubeSchedulerRes, err := safe.ReaderGetByID[*k8s.SchedulerConfig](ctx, r, k8s.FinalSchedulerConfigID)
 		if err != nil {
 			if state.IsNotFoundError(err) {
 				continue
@@ -132,6 +145,25 @@ func (ctrl *RenderConfigsStaticPodController) Run(ctx context.Context, r control
 		type configFile struct {
 			filename string
 			f        func() (runtime.Object, error)
+		}
+
+		apiServerConfigFiles := []configFile{
+			{
+				filename: "admission-control-config.yaml",
+				f:        admissionControlConfig(admissionConfig),
+			},
+			{
+				filename: "auditpolicy.yaml",
+				f:        auditPolicyConfig(auditConfig),
+			},
+			{
+				filename: "authorization-config.yaml",
+				f:        authorizationConfig(authorizerConfig, kubeAPIServerVersion),
+			},
+			{
+				filename: "authentication-config.yaml",
+				f:        authenticationConfig(authenticationConfigRes),
+			},
 		}
 
 		serializer := k8sjson.NewSerializerWithOptions(
@@ -157,20 +189,7 @@ func (ctrl *RenderConfigsStaticPodController) Run(ctx context.Context, r control
 				selinuxLabel: constants.KubernetesAPIServerConfigDirSELinuxLabel,
 				uid:          constants.KubernetesAPIServerRunUser,
 				gid:          constants.KubernetesAPIServerRunGroup,
-				configs: []configFile{
-					{
-						filename: "admission-control-config.yaml",
-						f:        admissionControlConfig(admissionConfig),
-					},
-					{
-						filename: "auditpolicy.yaml",
-						f:        auditPolicyConfig(auditConfig),
-					},
-					{
-						filename: "authorization-config.yaml",
-						f:        authorizationConfig(authorizerConfig, kubeAPIServerVersion),
-					},
-				},
+				configs:      apiServerConfigFiles,
 			},
 			{
 				name:         "kube-scheduler",
@@ -225,6 +244,10 @@ func (ctrl *RenderConfigsStaticPodController) Run(ctx context.Context, r control
 				authorizerConfigRes.Metadata().Version().String() +
 				kubeSchedulerRes.Metadata().Version().String()
 
+			if authenticationConfigRes != nil {
+				r.TypedSpec().Version += authenticationConfigRes.Metadata().Version().String()
+			}
+
 			return nil
 		}); err != nil {
 			return err
@@ -248,7 +271,8 @@ func admissionControlConfig(spec *k8s.AdmissionControlConfigSpec) func() (runtim
 				return nil, fmt.Errorf("error marshaling configuration for plugin %q: %w", plugin.Name, err)
 			}
 
-			cfg.Plugins = append(cfg.Plugins,
+			cfg.Plugins = append(
+				cfg.Plugins,
 				apiserverv1.AdmissionPluginConfiguration{
 					Name: plugin.Name,
 					Configuration: &runtime.Unknown{
@@ -276,17 +300,7 @@ func auditPolicyConfig(spec *k8s.AuditPolicyConfigSpec) func() (runtime.Object, 
 
 func schedulerConfig(spec *k8s.SchedulerConfigSpec) func() (runtime.Object, error) {
 	return func() (runtime.Object, error) {
-		var cfg schedulerv1.KubeSchedulerConfiguration
-
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructuredWithValidation(spec.Config, &cfg, false); err != nil {
-			return nil, fmt.Errorf("error unmarshaling scheduler configuration: %w", err)
-		}
-
-		cfg.APIVersion = "kubescheduler.config.k8s.io/v1"
-		cfg.Kind = "KubeSchedulerConfiguration"
-		cfg.ClientConnection.Kubeconfig = filepath.Join(constants.KubernetesSchedulerSecretsDir, "kubeconfig")
-
-		return &cfg, nil
+		return &unstructured.Unstructured{Object: spec.Config}, nil
 	}
 }
 
@@ -318,5 +332,19 @@ func authorizationConfig(spec *k8s.AuthorizationConfigSpec, kubeAPIServerVersion
 		}
 
 		return &cfg, nil
+	}
+}
+
+// authenticationConfig renders the kube-apiserver authentication configuration.
+//
+// It enables anonymous authentication only for the health endpoints, so unauthenticated probes can reach them
+// while every other endpoint keeps rejecting anonymous requests.
+func authenticationConfig(authenticationConfigRes *k8s.AuthenticationConfig) func() (runtime.Object, error) {
+	return func() (runtime.Object, error) {
+		if authenticationConfigRes == nil {
+			return &unstructured.Unstructured{Object: map[string]any{}}, nil
+		}
+
+		return &unstructured.Unstructured{Object: authenticationConfigRes.TypedSpec().Config}, nil
 	}
 }

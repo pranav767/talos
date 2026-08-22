@@ -40,6 +40,7 @@ var (
 	_ config.RawVolumeConfig = &RawVolumeConfigV1Alpha1{}
 	_ config.NamedDocument   = &RawVolumeConfigV1Alpha1{}
 	_ config.Validator       = &RawVolumeConfigV1Alpha1{}
+	_ config.SecretDocument  = &RawVolumeConfigV1Alpha1{}
 )
 
 const maxRawVolumeNameLength = constants.PartitionLabelLength - len(constants.RawVolumePrefix)
@@ -106,12 +107,17 @@ func (s *RawVolumeConfigV1Alpha1) Clone() config.Document {
 	return s.DeepCopy()
 }
 
+// Redact implements config.SecretDocument interface.
+func (s *RawVolumeConfigV1Alpha1) Redact(replacement string) {
+	s.EncryptionSpec.Redact(replacement)
+}
+
 // Validate implements config.Validator interface.
 //
 //nolint:gocyclo,dupl
 func (s *RawVolumeConfigV1Alpha1) Validate(validation.RuntimeMode, ...validation.Option) ([]string, error) {
 	var (
-		warnings         []string
+		warnings         []string //nolint:prealloc
 		validationErrors error
 	)
 

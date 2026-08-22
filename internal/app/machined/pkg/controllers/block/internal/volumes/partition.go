@@ -17,6 +17,7 @@ import (
 	"github.com/siderolabs/go-blockdevice/v2/partitioning/gpt"
 	"go.uber.org/zap"
 
+	"github.com/siderolabs/talos/internal/pkg/partition"
 	"github.com/siderolabs/talos/pkg/machinery/resources/block"
 )
 
@@ -64,7 +65,11 @@ func CreatePartition(ctx context.Context, logger *zap.Logger, diskPath string, v
 	available := pt.LargestContiguousAllocatable()
 
 	size := volumeCfg.TypedSpec().Provisioning.PartitionSpec.MinSize
-	maxSize := volumeCfg.TypedSpec().Provisioning.PartitionSpec.ResolveMaxSize(available)
+
+	maxSize, err := volumeCfg.TypedSpec().Provisioning.PartitionSpec.ResolveMaxSize(available)
+	if err != nil {
+		return CreatePartitionResult{}, fmt.Errorf("error resolving max size: %w", err)
+	}
 
 	if available < size {
 		// should never happen
@@ -101,11 +106,12 @@ func CreatePartition(ctx context.Context, logger *zap.Logger, diskPath string, v
 
 	defer partitionDev.Close() //nolint:errcheck
 
-	if err = partitionDev.FastWipe(); err != nil {
+	if err = partition.WipeWithSignatures(partitionDev, partitionDevName, logger.Sugar().Debugf); err != nil {
 		return CreatePartitionResult{}, xerrors.NewTaggedf[Retryable]("error wiping partition: %w", err)
 	}
 
-	logger.Info("partition created",
+	logger.Info(
+		"partition created",
 		zap.String("disk", diskPath), zap.Int("partition", partitionIdx),
 		zap.String("label", volumeCfg.TypedSpec().Provisioning.PartitionSpec.Label),
 		zap.String("size", humanize.IBytes(size)),

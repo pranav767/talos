@@ -23,6 +23,7 @@ import (
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/block"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/cluster"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/config"
+	containerctrls "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/containers"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/cri"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/etcd"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/files"
@@ -34,12 +35,17 @@ import (
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/perf"
 	runtimecontrollers "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/runtime"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/secrets"
+	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/security"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/siderolink"
+	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/storage"
 	timecontrollers "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/time"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/v1alpha1"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/runtime"
 	runtimelogging "github.com/siderolabs/talos/internal/app/machined/pkg/runtime/logging"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/system"
+	"github.com/siderolabs/talos/internal/pkg/lvm"
+	"github.com/siderolabs/talos/internal/pkg/md"
+	"github.com/siderolabs/talos/internal/pkg/selinux"
 	"github.com/siderolabs/talos/pkg/logging"
 	talosconfig "github.com/siderolabs/talos/pkg/machinery/config/config"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
@@ -57,14 +63,16 @@ type Controller struct {
 	logger          *zap.Logger
 
 	v1alpha1Runtime runtime.Runtime
+	reboot          func(ctx context.Context) error
 }
 
 // NewController creates Controller.
-func NewController(v1alpha1Runtime runtime.Runtime) (*Controller, error) {
+func NewController(v1alpha1Runtime runtime.Runtime, reboot func(ctx context.Context) error) (*Controller, error) {
 	ctrl := &Controller{
 		consoleLogLevel: zap.NewAtomicLevel(),
 		loggingManager:  v1alpha1Runtime.Logging(),
 		v1alpha1Runtime: v1alpha1Runtime,
+		reboot:          reboot,
 	}
 
 	var err error
@@ -80,6 +88,8 @@ func NewController(v1alpha1Runtime runtime.Runtime) (*Controller, error) {
 }
 
 // Run the controller runtime.
+//
+//nolint:gocyclo
 func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error {
 	// adjust the log level based on machine configuration
 	go ctrl.watchMachineConfig(ctx)
@@ -89,21 +99,17 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		return err
 	}
 
-	var (
-		etcRoot                xfs.Root
-		networkEtcRoot         xfs.Root
-		networkBindMountTarget string
-	)
-
-	etcRoot = &xfs.UnixRoot{
-		FS: fsopen.New(
-			"tmpfs",
-			fsopen.WithStringParameter("mode", "0755"),
-			fsopen.WithStringParameter("size", "8M"),
-		),
+	etcFSOpts := []fsopen.Option{
+		fsopen.WithStringParameter("mode", "0755"),
+		fsopen.WithStringParameter("size", "8M"),
 	}
 
-	networkEtcRoot = &xfs.UnixRoot{
+	// make the tmpfs selinux context match the /etc label
+	if selinux.IsEnabled() {
+		etcFSOpts = append(etcFSOpts, fsopen.WithStringParameter("context", constants.EtcSelinuxLabel))
+	}
+
+	var networkEtcRoot xfs.Root = &xfs.UnixRoot{
 		FS: fsopen.New(
 			"tmpfs",
 			fsopen.WithStringParameter("mode", "0755"),
@@ -111,50 +117,50 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		),
 	}
 
-	networkBindMountTarget = constants.SystemResolvedPath
-
-	// While running in container, we don't have control over kernel version
-	// shipped with the machine. If the kernel does not support open_tree syscall
-	// on anonymous filesystem file descriptors, we need to fallback to the classic,
-	// less secure mode. This capability was added in kernel 6.15.0.
-	if ctrl.v1alpha1Runtime.State().Platform().Mode().InContainer() {
-		opentreeOnAnonymous, err := runtime.KernelCapabilities().OpentreeOnAnonymousFS()
-		if err != nil {
-			return err
-		}
-
-		if !opentreeOnAnonymous {
-			etcRoot = &xfs.OSRoot{
-				Shadow: constants.SystemEtcPath,
-			}
-
-			networkEtcRoot = &xfs.OSRoot{
-				Shadow: constants.SystemResolvedPath,
-			}
-
-			networkBindMountTarget = ""
-		}
-	}
-
-	if err := etcRoot.OpenFS(); err != nil {
-		return fmt.Errorf("failed to open etc root: %w", err)
-	}
-	defer etcRoot.Close() //nolint:errcheck
+	networkBindMountTarget := constants.SystemResolvedPath
 
 	if err := networkEtcRoot.OpenFS(); err != nil {
 		return fmt.Errorf("failed to open network etc root: %w", err)
 	}
 	defer networkEtcRoot.Close() //nolint:errcheck
 
+	// /etc is a writable overlay (upper = a managed tmpfs labeled via etcFSOpts, lower = the
+	// static rootfs /etc) bind-mounted read-only at /etc. etcRoot is the detached writable overlay
+	// mount that controllers write managed files through; the read-only bind keeps /etc read-only
+	// at the path level.
+	etcRoot, etcOverlayUnmount, err := setupEtcOverlay(etcRootPath, etcFSOpts, ctrl.logger)
+	if err != nil {
+		return fmt.Errorf("failed to set up /etc overlay: %w", err)
+	}
+
+	defer etcOverlayUnmount() //nolint:errcheck
+
+	if ctrl.v1alpha1Runtime.State().Platform().Mode() != runtime.ModeContainer {
+		udevUnmount, err := setupUdevWritablePaths(constants.UdevDir, ctrl.logger)
+		if err != nil {
+			return fmt.Errorf("failed to set up udev writable paths: %w", err)
+		}
+
+		defer udevUnmount() //nolint:errcheck
+	}
+
+	lvmProvisioner, err := lvm.New()
+	if err != nil {
+		return fmt.Errorf("failed to initialize LVM: %w", err)
+	}
+
+	mdProvisioner, err := md.New()
+	if err != nil {
+		return fmt.Errorf("failed to initialize MD: %w", err)
+	}
+
 	for _, c := range []controller.Controller{
 		&block.DevicesController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
+		&block.DiscoveredVolumesStatusController{},
 		&block.DiscoveryController{},
 		&block.DisksController{},
-		&block.LVMActivationController{
-			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
-		},
 		&block.MountController{},
 		&block.MountRequestController{},
 		&block.MountStatusController{},
@@ -169,9 +175,51 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 			MetaProvider: ctrl.v1alpha1Runtime.State().Machine(),
 		},
 		&block.VolumeManagerController{},
+		&block.VolumeTrimController{},
+		&block.VolumeTrimScheduleController{},
 		&block.ZswapConfigController{},
 		&block.ZswapStatusController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+		},
+		&storage.LVMActivationController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+			LVM:          lvmProvisioner,
+		},
+		&storage.LVMLogicalVolumeReconcileController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+			LVM:          lvmProvisioner,
+		},
+		&storage.LVMLogicalVolumeSpecController{},
+		&storage.LVMPhysicalVolumeSpecController{},
+		&storage.LVMRefreshTriggerController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+		},
+		&storage.LVMScanController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+			LVM:          lvmProvisioner,
+		},
+		&storage.LVMVolumeGroupReconcileController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+			LVM:          lvmProvisioner,
+		},
+		&storage.LVMVolumeGroupSpecController{},
+		&storage.MDArraySpecController{},
+		&storage.MDMonitorController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+			MD:           mdProvisioner,
+		},
+		&storage.MDArrayReconcileController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+			State:        ctrl.v1alpha1Runtime.State().V1Alpha2().Resources(),
+			MD:           mdProvisioner,
+		},
+		&storage.MDLastResortController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+			MD:           mdProvisioner,
+		},
+		&block.FSScrubScheduleController{},
+		&block.FSScrubController{
+			Runtime: ctrl.v1alpha1Runtime,
 		},
 		&cluster.AffiliateMergeController{},
 		cluster.NewConfigController(),
@@ -203,7 +251,15 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		&cri.ImageCacheConfigController{
 			V1Alpha1ServiceManager: system.Services(ctrl.v1alpha1Runtime),
 		},
+		&cri.RuntimeSpecConfigController{},
+		&containerctrls.ConfigController{},
+		&cri.CustomizationConfigController{},
+		cri.NewImageGCController("containerd", false),
+		cri.NewImageGCController("cri", true),
 		&cri.RegistriesConfigController{},
+		&cri.ServiceController{
+			V1Alpha1Services: system.Services(ctrl.v1alpha1Runtime),
+		},
 		&cri.SeccompProfileController{},
 		&cri.SeccompProfileFileController{
 			V1Alpha1Mode:             ctrl.v1alpha1Runtime.State().Platform().Mode(),
@@ -215,19 +271,23 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		&etcd.SpecController{},
 		&etcd.MemberController{},
 		&files.CRIBaseRuntimeSpecController{},
-		&files.CRIConfigPartsController{},
-		&files.CRIRegistryConfigController{
+		&files.CRIConfigController{
 			EtcRoot: etcRoot,
-			EtcPath: "/etc",
 		},
+		&files.EtcFileConfigController{},
 		&files.EtcFileController{
 			EtcRoot: etcRoot,
-			EtcPath: "/etc",
 		},
 		&files.IQNController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
 		&files.NQNController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+		},
+		&files.UdevRulesController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+		},
+		&hardware.CPUInfoController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
 		&hardware.PCIDevicesController{
@@ -243,17 +303,23 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		},
 		&k8s.AddressFilterController{},
 		k8s.NewControlPlaneAPIServerController(),
+		k8s.NewControlPlaneAPIServerFinalController(),
 		k8s.NewControlPlaneAdmissionControlController(),
 		k8s.NewControlPlaneAuditPolicyController(),
+		k8s.NewControlPlaneAuthenticationController(),
 		k8s.NewControlPlaneAuthorizationController(),
 		k8s.NewControlPlaneBootstrapManifestsController(),
 		k8s.NewControlPlaneControllerManagerController(),
+		k8s.NewControlPlaneControllerManagerFinalController(),
 		k8s.NewControlPlaneExtraManifestsController(),
+		k8s.NewControlPlaneSchedulerFinalController(),
 		k8s.NewControlPlaneSchedulerController(),
 		&k8s.ControlPlaneStaticPodController{},
 		&k8s.EndpointController{},
+		&k8s.EtcdEncryptionConfigController{},
 		&k8s.ExtraManifestController{},
 		k8s.NewKubeletConfigController(),
+		&k8s.KubeletKubeconfigController{},
 		&k8s.KubeletServiceController{
 			V1Alpha1Services: system.Services(ctrl.v1alpha1Runtime),
 			V1Alpha1Mode:     ctrl.v1alpha1Runtime.State().Platform().Mode(),
@@ -262,6 +328,7 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
 		&k8s.KubeletStaticPodController{},
+		k8s.NewKubeletStatusController(),
 		k8s.NewKubePrismEndpointsController(),
 		k8s.NewKubePrismConfigController(),
 		&k8s.KubePrismController{},
@@ -315,6 +382,7 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		&network.EthernetStatusController{},
 		&network.HardwareAddrController{},
 		&network.HostDNSConfigController{},
+		&network.StaticHostController{},
 		&network.HostnameConfigController{
 			Cmdline: procfs.ProcCmdline(),
 		},
@@ -355,6 +423,8 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		&network.PlatformConfigLoadController{},
 		&network.PlatformConfigStoreController{},
 		&network.ProbeController{},
+		&network.ProbeConfigController{},
+		network.NewProbeMergeController(),
 		&network.ResolverConfigController{
 			Cmdline: procfs.ProcCmdline(),
 		},
@@ -366,6 +436,13 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		network.NewRouteMergeController(),
 		&network.RouteSpecController{},
 		&network.RouteStatusController{},
+		&network.BGPInstanceConfigController{},
+		&network.BGPController{},
+		&network.RouterAdvertisementController{},
+		&network.RoutingRuleConfigController{},
+		network.NewRoutingRuleMergeController(),
+		&network.RoutingRuleSpecController{},
+		&network.RoutingRuleStatusController{},
 		&network.StatusController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
@@ -375,10 +452,13 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		network.NewTimeServerMergeController(),
 		&network.TimeServerSpecController{},
 		&perf.StatsController{},
+		&runtimecontrollers.APIServiceConfigController{},
 		&runtimecontrollers.BootedEntryController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
-		&runtimecontrollers.CRIImageGCController{},
+		&runtimecontrollers.BootIDController{
+			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
+		},
 		&runtimecontrollers.DevicesStatusController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
@@ -388,6 +468,8 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 			MetaProvider: ctrl.v1alpha1Runtime.State().Machine(),
 		},
 		&runtimecontrollers.EnvironmentController{},
+		runtimecontrollers.NewUnattendedInstallController(ctrl.v1alpha1Runtime),
+		runtimecontrollers.NewRebootController(ctrl.v1alpha1Runtime, ctrl.reboot),
 		&runtimecontrollers.ExtensionServiceConfigController{},
 		&runtimecontrollers.ExtensionServiceConfigFilesController{
 			V1Alpha1Mode:            ctrl.v1alpha1Runtime.State().Platform().Mode(),
@@ -406,6 +488,7 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 			ConfigPath:       constants.ExtensionServiceConfigPath,
 		},
 		&runtimecontrollers.ExtensionStatusController{},
+		&runtimecontrollers.ImageFactorySchematicController{},
 		&runtimecontrollers.KernelCmdlineController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
@@ -431,11 +514,11 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		&runtimecontrollers.LogPersistenceController{
 			V1Alpha1Logging: ctrl.v1alpha1Runtime.Logging(),
 		},
-		&runtimecontrollers.LoadedKernelModuleController{
+		&runtimecontrollers.KernelModuleStatusController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
 		&runtimecontrollers.MaintenanceConfigController{},
-		&runtimecontrollers.MaintenanceServiceController{
+		&runtimecontrollers.MaintenanceServiceInformController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
 		&runtimecontrollers.MachineStatusController{
@@ -456,6 +539,10 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		&runtimecontrollers.OOMController{
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
 		},
+		&runtimecontrollers.UdevServiceController{
+			V1Alpha1Mode:     ctrl.v1alpha1Runtime.State().Platform().Mode(),
+			V1Alpha1Services: system.Services(ctrl.v1alpha1Runtime),
+		},
 		&secrets.APICertSANsController{},
 		&secrets.APIController{},
 		&secrets.EncryptionSaltController{},
@@ -464,7 +551,6 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		&secrets.KubernetesCertSANsController{},
 		&secrets.KubernetesDynamicCertsController{},
 		&secrets.KubernetesController{},
-		&secrets.MaintenanceController{},
 		&secrets.MaintenanceCertSANsController{},
 		&secrets.MaintenanceRootController{},
 		secrets.NewRootEtcdController(),
@@ -472,6 +558,8 @@ func (ctrl *Controller) Run(ctx context.Context, drainer *runtime.Drainer) error
 		secrets.NewRootOSController(),
 		&secrets.TrustedRootsController{},
 		&secrets.TrustdController{},
+		&security.ImageVerificationConfigController{},
+		&security.TUFTrustedRootController{},
 		&siderolink.ConfigController{
 			Cmdline:      procfs.ProcCmdline(),
 			V1Alpha1Mode: ctrl.v1alpha1Runtime.State().Platform().Mode(),
@@ -653,10 +741,12 @@ func (ctrl *Controller) MakeLogger(serviceName string) (*zap.Logger, error) {
 	}
 
 	return logging.ZapLogger(
-		logging.NewLogDestination(logWriter, zapcore.DebugLevel,
+		logging.NewLogDestination(
+			logWriter, zapcore.DebugLevel,
 			logging.WithColoredLevels(),
 		),
-		logging.NewLogDestination(logging.StdWriter, ctrl.consoleLogLevel,
+		logging.NewLogDestination(
+			logging.StdWriter, ctrl.consoleLogLevel,
 			logging.WithoutTimestamp(),
 			logging.WithoutLogLevels(),
 			logging.WithControllerErrorSuppressor(constants.ConsoleLogErrorSuppressThreshold),

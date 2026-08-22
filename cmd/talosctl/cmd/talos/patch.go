@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cosi-project/runtime/pkg/resource"
+	"github.com/cosi-project/runtime/pkg/resource/protobuf"
 	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v4"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -23,7 +24,6 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/client"
 	"github.com/siderolabs/talos/pkg/machinery/config/configpatcher"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
-	"github.com/siderolabs/talos/pkg/machinery/resources/config"
 )
 
 var patchCmdFlags struct {
@@ -38,6 +38,20 @@ var patchCmdFlags struct {
 
 func extractMachineConfigBody(mc resource.Resource) ([]byte, error) {
 	if mc.Metadata().Annotations().Empty() {
+		// this is backwards compatibility for versions of Talos which marshaled the MachineConfig spec as a YAML document
+		// instead of putting it as string
+		//
+		// if try to go via yaml.Marshal path, it will cut off all documents after the first one (as there is no way to return
+		// multiple documents from MarshalYAML), so we need to extract the original body from the resource
+		if pb, ok := mc.(*protobuf.Resource); ok {
+			p, err := pb.Marshal()
+			if err != nil {
+				return nil, fmt.Errorf("marshal protobuf resource: %w", err)
+			}
+
+			return []byte(p.GetSpec().GetYamlSpec()), nil
+		}
+
 		return yaml.Marshal(mc.Spec())
 	}
 
@@ -55,20 +69,8 @@ func extractMachineConfigBody(mc resource.Resource) ([]byte, error) {
 	return []byte(bodyStr), nil
 }
 
-func patchFn(c *client.Client, patches []configpatcher.Patch) func(context.Context, string, resource.Resource, error) error {
-	return func(ctx context.Context, node string, mc resource.Resource, callError error) error {
-		if callError != nil {
-			return fmt.Errorf("%s: %w", node, callError)
-		}
-
-		if mc.Metadata().Type() != config.MachineConfigType {
-			return fmt.Errorf("%s: unsupported resource type: %s", node, mc.Metadata().Type())
-		}
-
-		if mc.Metadata().ID() != config.ActiveID {
-			return nil
-		}
-
+func patchFn(patches []configpatcher.Patch) func(context.Context, *client.Client, string, resource.Resource) error {
+	return func(ctx context.Context, c *client.Client, node string, mc resource.Resource) error {
 		body, err := extractMachineConfigBody(mc)
 		if err != nil {
 			return err
@@ -100,7 +102,8 @@ func patchFn(c *client.Client, patches []configpatcher.Patch) func(context.Conte
 			return nil
 		}
 
-		fmt.Fprintf(os.Stderr, "patched %s/%s at the node %s\n",
+		fmt.Fprintf(
+			os.Stderr, "patched %s/%s at the node %s\n",
 			mc.Metadata().Type(),
 			mc.Metadata().ID(),
 			node,
@@ -118,33 +121,33 @@ var patchCmd = &cobra.Command{
 	Short: "Patch machine configuration of a Talos node with a local patch.",
 	Args:  cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return WithClient(func(ctx context.Context, c *client.Client) error {
-			if patchCmdFlags.patchFile != "" {
-				patchCmdFlags.patch = append(patchCmdFlags.patch, "@"+patchCmdFlags.patchFile)
-			}
+		if patchCmdFlags.patchFile != "" {
+			patchCmdFlags.patch = append(patchCmdFlags.patch, "@"+patchCmdFlags.patchFile)
+		}
 
-			if len(patchCmdFlags.patch) == 0 {
-				return errors.New("either --patch or --patch-file should be defined")
-			}
+		if len(patchCmdFlags.patch) == 0 {
+			return errors.New("either --patch or --patch-file should be defined")
+		}
 
-			patches, err := configpatcher.LoadPatches(patchCmdFlags.patch)
-			if err != nil {
-				return err
-			}
+		patches, err := configpatcher.LoadPatches(patchCmdFlags.patch)
+		if err != nil {
+			return err
+		}
 
-			if err := helpers.ClientVersionCheck(ctx, c); err != nil {
-				return err
-			}
+		ctx := cmd.Context()
 
-			for _, node := range GlobalArgs.Nodes {
-				nodeCtx := client.WithNodes(ctx, node)
-				if err := helpers.ForEachResource(nodeCtx, c, nil, patchFn(c, patches), patchCmdFlags.namespace, args...); err != nil {
-					return err
-				}
-			}
+		clientFactory, err := NewClientFactory(ctx, &patchCmdFlags)
+		if err != nil {
+			return err
+		}
 
-			return nil
-		})
+		defer clientFactory.Close() //nolint:errcheck
+
+		if err := helpers.ClientVersionCheck(ctx, clientFactory); err != nil {
+			return err
+		}
+
+		return helpers.MachineConfigUpdater(ctx, clientFactory, patchFn(patches), args)
 	},
 }
 

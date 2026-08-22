@@ -7,8 +7,8 @@ package generate
 import (
 	"fmt"
 	"net/url"
-
-	"github.com/siderolabs/go-pointer"
+	"slices"
+	"strings"
 
 	"github.com/siderolabs/talos/pkg/machinery/config/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/cri"
@@ -16,7 +16,7 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 )
 
-//nolint:gocyclo
+//nolint:gocyclo,cyclop
 func (in *Input) generateRegistryConfigs(machine *v1alpha1.MachineConfig) ([]config.Document, error) {
 	if !in.Options.VersionContract.MultidocNetworkConfigSupported() {
 		// old-style registry config
@@ -63,7 +63,7 @@ func (in *Input) generateRegistryConfigs(machine *v1alpha1.MachineConfig) ([]con
 				machine.MachineRegistries.RegistryConfig[host].RegistryTLS = &v1alpha1.RegistryTLSConfig{} //nolint:staticcheck // backwards compatibility
 			}
 
-			machine.MachineRegistries.RegistryConfig[host].RegistryTLS.TLSInsecureSkipVerify = pointer.To(true) //nolint:staticcheck // backwards compatibility
+			machine.MachineRegistries.RegistryConfig[host].RegistryTLS.TLSInsecureSkipVerify = new(true) //nolint:staticcheck // backwards compatibility
 		}
 
 		return nil, nil
@@ -105,12 +105,28 @@ func (in *Input) generateRegistryConfigs(machine *v1alpha1.MachineConfig) ([]con
 			tlsConfigs[host] = cri.NewRegistryTLSConfigV1Alpha1(host)
 		}
 
-		tlsConfigs[host].TLSInsecureSkipVerify = pointer.To(true)
+		tlsConfigs[host].TLSInsecureSkipVerify = new(true)
 	}
 
 	for _, tlsConfig := range tlsConfigs {
 		documents = append(documents, tlsConfig)
 	}
+
+	// sort the TLS config and registry mirrors docs alphabetically by the name
+	slices.SortStableFunc(documents, func(a, b config.Document) int {
+		na, aok := a.(config.NamedDocument)
+		nb, bok := b.(config.NamedDocument)
+
+		if c := strings.Compare(a.Kind(), b.Kind()); c != 0 {
+			return c
+		}
+
+		if aok && bok {
+			return strings.Compare(na.Name(), nb.Name())
+		}
+
+		return 0
+	})
 
 	return documents, nil
 }

@@ -25,7 +25,6 @@ import (
 	"github.com/siderolabs/talos/internal/integration/base"
 	"github.com/siderolabs/talos/pkg/machinery/client"
 	networkconfig "github.com/siderolabs/talos/pkg/machinery/config/types/network"
-	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
 )
 
@@ -132,12 +131,13 @@ func (suite *EthernetSuite) TestEthernetConfig() {
 
 		cfgDocument := networkconfig.NewEthernetConfigV1Alpha1(linkName)
 		cfgDocument.RingsConfig = &networkconfig.EthernetRingsConfig{
-			RX: pointer.To(newRX),
+			RX: new(newRX),
 		}
 		suite.PatchMachineConfig(nodeCtx, cfgDocument)
 
 		// now EthernetStatus should reflect the new RX rings
-		rtestutils.AssertResource(nodeCtx, suite.T(), suite.Client.COSI, linkName,
+		rtestutils.AssertResource(
+			nodeCtx, suite.T(), suite.Client.COSI, linkName,
 			func(ethStatus *network.EthernetStatus, asrt *assert.Assertions) {
 				asrt.Equal(newRX, pointer.SafeDeref(ethStatus.TypedSpec().Rings.RX))
 			},
@@ -149,7 +149,8 @@ func (suite *EthernetSuite) TestEthernetConfig() {
 		suite.PatchMachineConfig(nodeCtx, cfgDocument)
 
 		// now EthernetStatus should reflect the new RX rings
-		rtestutils.AssertResource(nodeCtx, suite.T(), suite.Client.COSI, linkName,
+		rtestutils.AssertResource(
+			nodeCtx, suite.T(), suite.Client.COSI, linkName,
 			func(ethStatus *network.EthernetStatus, asrt *assert.Assertions) {
 				asrt.Equal(pointer.SafeDeref(prevRingConfig.RX), pointer.SafeDeref(ethStatus.TypedSpec().Rings.RX))
 			},
@@ -174,7 +175,8 @@ func (suite *EthernetSuite) TestEthernetConfig() {
 		suite.PatchMachineConfig(nodeCtx, cfgDocument)
 
 		// now EthernetStatus should reflect the new feature status
-		rtestutils.AssertResource(nodeCtx, suite.T(), suite.Client.COSI, linkName,
+		rtestutils.AssertResource(
+			nodeCtx, suite.T(), suite.Client.COSI, linkName,
 			func(ethStatus *network.EthernetStatus, asrt *assert.Assertions) {
 				asrt.Equal(!initialState, getFeatureStatus(suite.T(), ethStatus.TypedSpec().Features, featureName))
 			},
@@ -186,7 +188,8 @@ func (suite *EthernetSuite) TestEthernetConfig() {
 		suite.PatchMachineConfig(nodeCtx, cfgDocument)
 
 		// now EthernetStatus should reflect the old feature status
-		rtestutils.AssertResource(nodeCtx, suite.T(), suite.Client.COSI, linkName,
+		rtestutils.AssertResource(
+			nodeCtx, suite.T(), suite.Client.COSI, linkName,
 			func(ethStatus *network.EthernetStatus, asrt *assert.Assertions) {
 				asrt.Equal(initialState, getFeatureStatus(suite.T(), ethStatus.TypedSpec().Features, featureName))
 			},
@@ -213,24 +216,10 @@ func (suite *EthernetSuite) TestBridgeMAC() {
 
 	randomSuffix := fmt.Sprintf("%04x", rand.Int32())
 
-	patch1 := v1alpha1.Config{
-		MachineConfig: &v1alpha1.MachineConfig{
-			MachineNetwork: &v1alpha1.NetworkConfig{
-				NetworkInterfaces: v1alpha1.NetworkDeviceList{
-					{
-						DeviceInterface: "dummy" + randomSuffix,
-						DeviceDummy:     pointer.To(true),
-					},
-					{
-						DeviceInterface: "bridge" + randomSuffix,
-						DeviceBridge:    &v1alpha1.Bridge{},
-					},
-				},
-			},
-		},
-	}
+	dc := networkconfig.NewDummyLinkConfigV1Alpha1("dummy" + randomSuffix)
+	bc := networkconfig.NewBridgeConfigV1Alpha1("bridge" + randomSuffix)
 
-	suite.PatchMachineConfig(nodeCtx, patch1)
+	suite.PatchMachineConfig(nodeCtx, dc, bc)
 
 	var dummyMAC string
 
@@ -246,22 +235,9 @@ func (suite *EthernetSuite) TestBridgeMAC() {
 	suite.Assert().NotEmpty(dummyMAC, "dummy MAC address is empty")
 
 	// now, let's put dummy interface into the bridge
-	patch2 := v1alpha1.Config{
-		MachineConfig: &v1alpha1.MachineConfig{
-			MachineNetwork: &v1alpha1.NetworkConfig{
-				NetworkInterfaces: v1alpha1.NetworkDeviceList{
-					{
-						DeviceInterface: "bridge" + randomSuffix,
-						DeviceBridge: &v1alpha1.Bridge{
-							BridgedInterfaces: []string{"dummy" + randomSuffix},
-						},
-					},
-				},
-			},
-		},
-	}
+	bc.BridgeLinks = []string{"dummy" + randomSuffix}
 
-	suite.PatchMachineConfig(nodeCtx, patch2)
+	suite.PatchMachineConfig(nodeCtx, dc, bc)
 
 	// now bridge should have the same MAC address as dummy
 	rtestutils.AssertResources(nodeCtx, suite.T(), suite.Client.COSI,
@@ -271,24 +247,22 @@ func (suite *EthernetSuite) TestBridgeMAC() {
 		})
 
 	// revert the changes removing the dummy interface from the bridge
-	patch3 := map[string]any{
-		"machine": map[string]any{
-			"network": map[string]any{
-				"interfaces": []map[string]any{
-					{
-						"interface": "bridge" + randomSuffix,
-						"$patch":    "delete",
-					},
-					{
-						"interface": "dummy" + randomSuffix,
-						"$patch":    "delete",
-					},
-				},
-			},
+	patches := []any{
+		map[string]any{
+			"apiVersion": "v1alpha1",
+			"kind":       networkconfig.BridgeKind,
+			"name":       "bridge" + randomSuffix,
+			"$patch":     "delete",
+		},
+		map[string]any{
+			"apiVersion": "v1alpha1",
+			"kind":       networkconfig.DummyLinkKind,
+			"name":       "dummy" + randomSuffix,
+			"$patch":     "delete",
 		},
 	}
 
-	suite.PatchMachineConfig(nodeCtx, patch3)
+	suite.PatchMachineConfig(nodeCtx, patches...)
 
 	rtestutils.AssertNoResource[*network.LinkStatus](nodeCtx, suite.T(), suite.Client.COSI, "dummy"+randomSuffix)
 	rtestutils.AssertNoResource[*network.LinkStatus](nodeCtx, suite.T(), suite.Client.COSI, "bridge"+randomSuffix)

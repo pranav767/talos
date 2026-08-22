@@ -26,9 +26,12 @@ type VolumeMountStatusSpec struct {
 	VolumeID  string `yaml:"volumeID" protobuf:"1"`
 	Requester string `yaml:"requester" protobuf:"2"`
 
-	Target   string `yaml:"target" protobuf:"3"`
-	ReadOnly bool   `yaml:"readOnly" protobuf:"4"`
-	Detached bool   `yaml:"detached" protobuf:"5"`
+	Target            string `yaml:"target" protobuf:"3"`
+	ReadOnly          bool   `yaml:"readOnly" protobuf:"4"`
+	Detached          bool   `yaml:"detached" protobuf:"5"`
+	DisableAccessTime bool   `yaml:"disableAccessTime" protobuf:"6"`
+	Secure            bool   `yaml:"secure" protobuf:"7"`
+	NoExec            bool   `yaml:"noExec" protobuf:"8"`
 
 	root any
 }

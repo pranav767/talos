@@ -19,7 +19,7 @@ import (
 // ConfigController watches v1alpha1.Config, updates KubeSpan config.
 type ConfigController = transform.Controller[*config.MachineConfig, *kubespan.Config]
 
-// NewConfigController instanciates the config controller.
+// NewConfigController instantiates the config controller.
 func NewConfigController() *ConfigController {
 	return transform.NewController(
 		transform.Settings[*config.MachineConfig, *kubespan.Config]{
@@ -33,6 +33,10 @@ func NewConfigController() *ConfigController {
 					return optional.None[*kubespan.Config]()
 				}
 
+				if cfg.Config().DiscoveryIdentityConfig() == nil {
+					return optional.None[*kubespan.Config]()
+				}
+
 				return optional.Some(kubespan.NewConfig(config.NamespaceName, kubespan.ConfigID))
 			},
 			TransformFunc: func(ctx context.Context, r controller.Reader, logger *zap.Logger, cfg *config.MachineConfig, res *kubespan.Config) error {
@@ -43,14 +47,23 @@ func NewConfigController() *ConfigController {
 				if cfg != nil && cfg.Config().Machine() != nil {
 					c := cfg.Config()
 
-					res.TypedSpec().Enabled = c.Machine().Network().KubeSpan().Enabled()
-					res.TypedSpec().ClusterID = c.Cluster().ID()
-					res.TypedSpec().SharedSecret = c.Cluster().Secret()
-					res.TypedSpec().ForceRouting = c.Machine().Network().KubeSpan().ForceRouting()
-					res.TypedSpec().AdvertiseKubernetesNetworks = c.Machine().Network().KubeSpan().AdvertiseKubernetesNetworks()
-					res.TypedSpec().HarvestExtraEndpoints = c.Machine().Network().KubeSpan().HarvestExtraEndpoints()
-					res.TypedSpec().MTU = c.Machine().Network().KubeSpan().MTU()
-					res.TypedSpec().EndpointFilters = c.Machine().Network().KubeSpan().Filters().Endpoints()
+					if c.NetworkKubeSpanConfig() != nil {
+						res.TypedSpec().Enabled = c.NetworkKubeSpanConfig().Enabled()
+						res.TypedSpec().ForceRouting = c.NetworkKubeSpanConfig().ForceRouting()
+						res.TypedSpec().AdvertiseKubernetesNetworks = c.NetworkKubeSpanConfig().AdvertiseKubernetesNetworks()
+						res.TypedSpec().HarvestExtraEndpoints = c.NetworkKubeSpanConfig().HarvestExtraEndpoints()
+						res.TypedSpec().MTU = c.NetworkKubeSpanConfig().MTU()
+
+						if c.NetworkKubeSpanConfig().Filters() != nil {
+							res.TypedSpec().EndpointFilters = c.NetworkKubeSpanConfig().Filters().Endpoints()
+							res.TypedSpec().ExcludeAdvertisedNetworks = c.NetworkKubeSpanConfig().Filters().ExcludeAdvertisedNetworks()
+						}
+					}
+
+					identity := c.DiscoveryIdentityConfig()
+					res.TypedSpec().ClusterID = identity.ClusterID()
+					res.TypedSpec().SharedSecret = identity.ClusterSecret()
+
 					res.TypedSpec().ExtraEndpoints = c.KubespanConfig().ExtraAnnouncedEndpoints()
 				}
 

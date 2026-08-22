@@ -8,10 +8,11 @@ package mgmt
 
 import (
 	"net"
+	"slices"
 	"strings"
 
+	"github.com/siderolabs/gen/xslices"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/siderolabs/talos/pkg/provision/providers/vm"
 )
@@ -29,19 +30,9 @@ var dnsdLaunchCmd = &cobra.Command{
 	Args:   cobra.NoArgs,
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var ips []net.IP
+		ips := xslices.Map(slices.Collect(strings.SplitSeq(dnsdLaunchCmdFlags.addr, ",")), net.ParseIP)
 
-		for ip := range strings.SplitSeq(dnsdLaunchCmdFlags.addr, ",") {
-			ips = append(ips, net.ParseIP(ip))
-		}
-
-		var eg errgroup.Group
-
-		eg.Go(func() error {
-			return vm.DNSd(ips, dnsdLaunchCmdFlags.resolvConf)
-		})
-
-		return eg.Wait()
+		return vm.DNSd(cmd.Context(), ips, dnsdLaunchCmdFlags.resolvConf)
 	},
 }
 

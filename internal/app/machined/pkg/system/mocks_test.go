@@ -13,6 +13,7 @@ import (
 	"github.com/siderolabs/talos/internal/app/machined/pkg/runtime"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/system/events"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/system/health"
+	"github.com/siderolabs/talos/internal/app/machined/pkg/system/pid"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/system/runner"
 	"github.com/siderolabs/talos/pkg/conditions"
 )
@@ -71,20 +72,20 @@ func (m *MockService) Volumes(runtime.Runtime) []string {
 type MockHealthcheckedService struct {
 	MockService
 
-	notHealthy uint32
+	notHealthy atomic.Uint32
 }
 
 func (m *MockHealthcheckedService) SetHealthy(healthy bool) {
 	if healthy {
-		atomic.StoreUint32(&m.notHealthy, 0)
+		m.notHealthy.Store(0)
 	} else {
-		atomic.StoreUint32(&m.notHealthy, 1)
+		m.notHealthy.Store(1)
 	}
 }
 
 func (m *MockHealthcheckedService) HealthFunc(runtime.Runtime) health.Check {
 	return func(context.Context) error {
-		if atomic.LoadUint32(&m.notHealthy) == 0 {
+		if m.notHealthy.Load() == 0 {
 			return nil
 		}
 
@@ -112,7 +113,7 @@ func (m *MockRunner) Close() error {
 	return nil
 }
 
-func (m *MockRunner) Run(eventSink events.Recorder) error {
+func (m *MockRunner) Run(eventSink events.Recorder, _ pid.Recorder) error {
 	eventSink(events.StateRunning, "Running")
 
 	return <-m.exitCh
@@ -126,6 +127,30 @@ func (m *MockRunner) Stop() error {
 
 func (m *MockRunner) String() string {
 	return "MockRunner()"
+}
+
+// MockFinishingRunner models a one-shot service: it runs to completion right away,
+// and it never reports events.StateRunning, so the service is never 'up'.
+type MockFinishingRunner struct{}
+
+func (MockFinishingRunner) Open() error {
+	return nil
+}
+
+func (MockFinishingRunner) Close() error {
+	return nil
+}
+
+func (MockFinishingRunner) Run(events.Recorder, pid.Recorder) error {
+	return nil
+}
+
+func (MockFinishingRunner) Stop() error {
+	return nil
+}
+
+func (MockFinishingRunner) String() string {
+	return "MockFinishingRunner()"
 }
 
 type MockCondition struct {

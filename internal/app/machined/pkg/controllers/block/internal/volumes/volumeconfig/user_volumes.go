@@ -10,7 +10,6 @@ import (
 	"fmt"
 
 	"github.com/siderolabs/gen/xerrors"
-	"github.com/siderolabs/go-pointer"
 
 	"github.com/siderolabs/talos/internal/pkg/partition"
 	configconfig "github.com/siderolabs/talos/pkg/machinery/config/config"
@@ -46,11 +45,12 @@ func UserVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 		userVolumeResource := VolumeResource{
 			VolumeID:           volumeID,
 			Label:              block.UserVolumeLabel,
-			MountTransformFunc: DefaultMountTransform,
+			MountTransformFunc: HandleUserVolumeMountRequest(userVolumeConfig), // This is overridden for Directory type below.
 		}
 
 		switch userVolumeConfig.Type().ValueOr(block.VolumeTypePartition) {
 		case block.VolumeTypeDirectory:
+			userVolumeResource.MountTransformFunc = DefaultMountTransform
 			userVolumeResource.TransformFunc = NewBuilder().
 				WithType(block.VolumeTypeDirectory).
 				WithMount(block.MountSpec{
@@ -60,7 +60,7 @@ func UserVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 					FileMode:     0o755,
 					UID:          0,
 					GID:          0,
-					BindTarget:   pointer.To(userVolumeConfig.Name()),
+					BindTarget:   new(userVolumeConfig.Name()),
 				}).
 				WriterFunc()
 
@@ -75,9 +75,11 @@ func UserVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 					},
 					PartitionSpec: block.PartitionSpec{
 						TypeUUID: partition.LinuxFilesystemData,
+						Grow:     true,
 					},
 					FilesystemSpec: block.FilesystemSpec{
-						Type: userVolumeConfig.Filesystem().Type(),
+						Type:                   userVolumeConfig.Filesystem().Type(),
+						MinAllocationGroupSize: minAllocationGroupSize(userVolumeConfig.Filesystem()),
 					},
 				}).
 				WithMount(block.MountSpec{
@@ -89,6 +91,8 @@ func UserVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 					GID:                 0,
 					ProjectQuotaSupport: userVolumeConfig.Filesystem().ProjectQuotaSupport(),
 				}).
+				WithTrim(c, userVolumeConfig).
+				WithScrub(c, userVolumeConfig).
 				WithConvertEncryptionConfiguration(userVolumeConfig.Encryption()).
 				WriterFunc()
 
@@ -105,12 +109,14 @@ func UserVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 						MinSize:         cmp.Or(userVolumeConfig.Provisioning().MinSize().ValueOrZero(), MinUserVolumeSize),
 						MaxSize:         userVolumeConfig.Provisioning().MaxSize().ValueOrZero(),
 						RelativeMaxSize: userVolumeConfig.Provisioning().RelativeMaxSize().ValueOrZero(),
+						NegativeMaxSize: userVolumeConfig.Provisioning().MaxSizeNegative(),
 						Grow:            userVolumeConfig.Provisioning().Grow().ValueOrZero(),
 						Label:           volumeID,
 						TypeUUID:        partition.LinuxFilesystemData,
 					},
 					FilesystemSpec: block.FilesystemSpec{
-						Type: userVolumeConfig.Filesystem().Type(),
+						Type:                   userVolumeConfig.Filesystem().Type(),
+						MinAllocationGroupSize: minAllocationGroupSize(userVolumeConfig.Filesystem()),
 					},
 				}).
 				WithMount(block.MountSpec{
@@ -122,6 +128,8 @@ func UserVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 					GID:                 0,
 					ProjectQuotaSupport: userVolumeConfig.Filesystem().ProjectQuotaSupport(),
 				}).
+				WithTrim(c, userVolumeConfig).
+				WithScrub(c, userVolumeConfig).
 				WithConvertEncryptionConfiguration(userVolumeConfig.Encryption()).
 				WriterFunc()
 
@@ -190,6 +198,7 @@ func ExistingVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) 
 
 	for _, existingVolumeConfig := range c.ExistingVolumeConfigs() {
 		volumeID := constants.ExistingVolumePrefix + existingVolumeConfig.Name()
+
 		resources = append(resources, VolumeResource{
 			VolumeID: volumeID,
 			Label:    block.ExistingVolumeLabel,
@@ -204,6 +213,8 @@ func ExistingVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) 
 					UID:          0,
 					GID:          0,
 				}).
+				WithTrim(c, existingVolumeConfig).
+				WithScrub(c, existingVolumeConfig).
 				WriterFunc(),
 			MountTransformFunc: HandleExistingVolumeMountRequest(existingVolumeConfig),
 		})
@@ -266,7 +277,7 @@ func externalVolumeSource(ext configconfig.ExternalVolumeConfig) string {
 			return ext.Mount().Virtiofs().ValueOrZero().Source()
 		}
 
-	case block.FilesystemTypeNone, block.FilesystemTypeXFS, block.FilesystemTypeVFAT, block.FilesystemTypeEXT4, block.FilesystemTypeISO9660, block.FilesystemTypeSwap:
+	case block.FilesystemTypeNone, block.FilesystemTypeXFS, block.FilesystemTypeVFAT, block.FilesystemTypeEXT4, block.FilesystemTypeISO9660, block.FilesystemTypeSwap, block.FilesystemTypeBtrfs:
 		fallthrough
 
 	default:
@@ -285,7 +296,7 @@ func externalVolumeParameters(ext configconfig.ExternalVolumeConfig) ([]block.Pa
 
 		return nil, errors.New("virtiofs mount specification is required for Virtiofs external volume")
 
-	case block.FilesystemTypeNone, block.FilesystemTypeXFS, block.FilesystemTypeVFAT, block.FilesystemTypeEXT4, block.FilesystemTypeISO9660, block.FilesystemTypeSwap:
+	case block.FilesystemTypeNone, block.FilesystemTypeXFS, block.FilesystemTypeVFAT, block.FilesystemTypeEXT4, block.FilesystemTypeISO9660, block.FilesystemTypeSwap, block.FilesystemTypeBtrfs:
 		fallthrough
 
 	default:
@@ -315,8 +326,10 @@ func SwapVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 						Match: swapVolumeConfig.Provisioning().DiskSelector().ValueOr(noMatch),
 					},
 					PartitionSpec: block.PartitionSpec{
-						MaxSize:         cmp.Or(swapVolumeConfig.Provisioning().MaxSize().ValueOrZero(), MinUserVolumeSize),
+						MinSize:         cmp.Or(swapVolumeConfig.Provisioning().MinSize().ValueOrZero(), MinUserVolumeSize),
+						MaxSize:         swapVolumeConfig.Provisioning().MaxSize().ValueOrZero(),
 						RelativeMaxSize: swapVolumeConfig.Provisioning().RelativeMaxSize().ValueOrZero(),
+						NegativeMaxSize: swapVolumeConfig.Provisioning().MaxSizeNegative(),
 						Grow:            swapVolumeConfig.Provisioning().Grow().ValueOrZero(),
 						Label:           volumeID,
 						TypeUUID:        partition.LinkSwap,
@@ -334,11 +347,25 @@ func SwapVolumeTransformer(c configconfig.Config) ([]VolumeResource, error) {
 	return resources, nil
 }
 
+// HandleUserVolumeMountRequest returns a MountTransformFunc for user volumes.
+func HandleUserVolumeMountRequest(userVolumeConfig configconfig.UserVolumeConfig) func(m *block.VolumeMountRequest) error {
+	return func(m *block.VolumeMountRequest) error {
+		m.TypedSpec().DisableAccessTime = userVolumeConfig.Mount().DisableAccessTime()
+		m.TypedSpec().Secure = userVolumeConfig.Mount().Secure()
+		m.TypedSpec().NoExec = userVolumeConfig.Mount().Secure()
+
+		return nil
+	}
+}
+
 // HandleExistingVolumeMountRequest returns a MountTransformFunc for existing volumes.
 // It sets `VolumeMountRequestSpec.ReadOnly` based on the existing configuration.
 func HandleExistingVolumeMountRequest(existingVolumeConfig configconfig.ExistingVolumeConfig) func(m *block.VolumeMountRequest) error {
 	return func(m *block.VolumeMountRequest) error {
 		m.TypedSpec().ReadOnly = existingVolumeConfig.Mount().ReadOnly()
+		m.TypedSpec().DisableAccessTime = existingVolumeConfig.Mount().DisableAccessTime()
+		m.TypedSpec().Secure = existingVolumeConfig.Mount().Secure()
+		m.TypedSpec().NoExec = existingVolumeConfig.Mount().Secure()
 
 		return nil
 	}
@@ -348,6 +375,9 @@ func HandleExistingVolumeMountRequest(existingVolumeConfig configconfig.Existing
 func HandleExternalVolumeMountRequest(externalVolumeConfig configconfig.ExternalVolumeConfig) func(m *block.VolumeMountRequest) error {
 	return func(m *block.VolumeMountRequest) error {
 		m.TypedSpec().ReadOnly = externalVolumeConfig.Mount().ReadOnly()
+		m.TypedSpec().DisableAccessTime = externalVolumeConfig.Mount().DisableAccessTime()
+		m.TypedSpec().Secure = externalVolumeConfig.Mount().Secure()
+		m.TypedSpec().NoExec = externalVolumeConfig.Mount().Secure()
 
 		return nil
 	}

@@ -5,6 +5,7 @@
 package grub
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -74,7 +75,7 @@ func (c *Config) Install(opts options.InstallOptions) (*options.InstallResult, e
 		opts.BootDisk,
 		mountSpecs,
 		func() error {
-			if err := c.runGrubInstall(opts, efiFound); err != nil {
+			if err := c.runGrubInstall(context.Background(), opts, efiFound); err != nil {
 				return err
 			}
 
@@ -94,7 +95,7 @@ func (c *Config) Install(opts options.InstallOptions) (*options.InstallResult, e
 	}, err
 }
 
-func (c *Config) generateGrubImage(opts options.InstallOptions) error {
+func (c *Config) generateGrubImage(ctx context.Context, opts options.InstallOptions) error {
 	var copyInstructions []utils.CopyInstruction
 
 	grubSourceDirectory := "/usr/lib/grub"
@@ -121,26 +122,30 @@ func (c *Config) generateGrubImage(opts options.InstallOptions) error {
 		"all_video",
 	}
 
+	const grubPrefix = "(hd0,gpt3)/grub" // EFI, BIOS, BOOT
+
+	// in amd64 mode only, install GRUB BIOS mode
 	if opts.Arch == "amd64" {
 		grub32Modules := []string{
 			"biosdisk",
 			"part_msdos",
 		}
 
-		args := []string{
+		args := []string{ //nolint:prealloc // very dynamic length
 			"--format",
 			"i386-pc",
 			"--output",
 			filepath.Join(opts.MountPrefix, "core.img"),
 			"--prefix",
-			"(hd0,gpt3)/grub",
+			grubPrefix,
 		}
 
 		args = append(args, slices.Concat(grubModules, grub32Modules)...)
 
-		if _, err := cmd.Run(
+		if _, err := cmd.RunWithOptions(
+			ctx,
 			"grub-mkimage",
-			args...,
+			args,
 		); err != nil {
 			return fmt.Errorf("failed to generate grub core image: %w", err)
 		}
@@ -153,37 +158,34 @@ func (c *Config) generateGrubImage(opts options.InstallOptions) error {
 
 	grubEFIPath := filepath.Join(opts.MountPrefix, "grub-efi.img")
 
-	var (
-		platform string
-		prefix   string
-	)
+	var platform string
 
+	// install GRUB in UEFI mode
 	switch opts.Arch {
 	case "amd64":
 		platform = "x86_64-efi"
-		prefix = "(hd0,gpt3)/grub" // EFI, BIOS, BOOT
 	case "arm64":
 		platform = "arm64-efi"
-		prefix = "(hd0,gpt2)/grub" // EFI, BOOT
 	default:
 		return fmt.Errorf("unsupported architecture for grub image: %s", opts.Arch)
 	}
 
-	args := []string{
+	args := []string{ //nolint:prealloc // very dynamic length
 		"--format",
 		platform,
 		"--output",
 		grubEFIPath,
 		"--prefix",
-		prefix,
+		grubPrefix,
 		"--compression",
 		"xz",
 	}
 	args = append(args, grubModules...)
 
-	if _, err := cmd.Run(
+	if _, err := cmd.RunWithOptions(
+		ctx,
 		"grub-mkimage",
-		args...,
+		args,
 	); err != nil {
 		return fmt.Errorf("failed to generate grub efi image: %w", err)
 	}
@@ -283,14 +285,14 @@ func (c *Config) generateAssets(opts options.InstallOptions) error {
 	}
 
 	if opts.ImageMode {
-		return c.generateGrubImage(opts)
+		return c.generateGrubImage(context.Background(), opts)
 	}
 
 	return nil
 }
 
 //nolint:gocyclo
-func (c *Config) runGrubInstall(opts options.InstallOptions, efiMode bool) error {
+func (c *Config) runGrubInstall(ctx context.Context, opts options.InstallOptions, efiMode bool) error {
 	var platforms []string
 
 	switch opts.Arch {
@@ -331,7 +333,7 @@ func (c *Config) runGrubInstall(opts options.InstallOptions, efiMode bool) error
 
 		opts.Printf("executing: grub-install %s", strings.Join(args, " "))
 
-		if _, err := cmd.Run("grub-install", args...); err != nil {
+		if _, err := cmd.RunWithOptions(ctx, "grub-install", args); err != nil {
 			return fmt.Errorf("failed to install grub: %w", err)
 		}
 	}

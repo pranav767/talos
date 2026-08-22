@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
-	"github.com/siderolabs/go-pointer"
 	"github.com/siderolabs/go-procfs/procfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -68,7 +67,7 @@ func (suite *HostnameConfigSuite) TestDefaultStableHostname() {
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
 					MachineFeatures: &v1alpha1.FeaturesConfig{
-						StableHostname: pointer.To(true),
+						StableHostname: new(true),
 					},
 				},
 			},
@@ -113,7 +112,7 @@ func (suite *HostnameConfigSuite) TestLegacyMachineConfiguration() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineNetwork: &v1alpha1.NetworkConfig{
+					MachineNetwork: &v1alpha1.NetworkConfig{ //nolint:staticcheck // legacy config
 						NetworkHostname: "foo",
 					},
 				},
@@ -152,7 +151,7 @@ func (suite *HostnameConfigSuite) TestMachineConfigurationStaticHostname() {
 	suite.Require().NoError(suite.Runtime().RegisterController(&netctrl.HostnameConfigController{}))
 
 	hostnameCfg := networkcfg.NewHostnameConfigV1Alpha1()
-	hostnameCfg.ConfigAuto = pointer.To(nethelpers.AutoHostnameKindOff)
+	hostnameCfg.ConfigAuto = new(nethelpers.AutoHostnameKindOff)
 	hostnameCfg.ConfigHostname = "my-hostname"
 
 	ctr, err := container.New(hostnameCfg)
@@ -181,7 +180,7 @@ func (suite *HostnameConfigSuite) TestMachineConfigurationDefaultStable() {
 	suite.Require().NoError(suite.Runtime().RegisterController(&netctrl.HostnameConfigController{}))
 
 	hostnameCfg := networkcfg.NewHostnameConfigV1Alpha1()
-	hostnameCfg.ConfigAuto = pointer.To(nethelpers.AutoHostnameKindStable)
+	hostnameCfg.ConfigAuto = new(nethelpers.AutoHostnameKindStable)
 
 	ctr, err := container.New(hostnameCfg)
 	suite.Require().NoError(err)
@@ -198,6 +197,21 @@ func (suite *HostnameConfigSuite) TestMachineConfigurationDefaultStable() {
 		asrt.Equal("", r.TypedSpec().Domainname)
 		asrt.Equal(network.ConfigDefault, r.TypedSpec().ConfigLayer)
 	}, rtestutils.WithNamespace(network.ConfigNamespaceName))
+}
+
+func (suite *HostnameConfigSuite) TestMachineConfigurationDefaultOff() {
+	suite.Require().NoError(suite.Runtime().RegisterController(&netctrl.HostnameConfigController{}))
+
+	hostnameCfg := networkcfg.NewHostnameConfigV1Alpha1()
+	hostnameCfg.ConfigAuto = new(nethelpers.AutoHostnameKindOff)
+
+	ctr, err := container.New(hostnameCfg)
+	suite.Require().NoError(err)
+
+	cfg := config.NewMachineConfig(ctr)
+	suite.Create(cfg)
+
+	ctest.AssertNoResource[*network.HostnameSpec](suite, "default/hostname", rtestutils.WithNamespace(network.ConfigNamespaceName))
 }
 
 func TestHostnameConfigSuite(t *testing.T) {

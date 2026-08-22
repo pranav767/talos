@@ -13,7 +13,6 @@ import (
 
 	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
 	"github.com/cosi-project/runtime/pkg/state"
-	"github.com/siderolabs/go-pointer"
 	"github.com/siderolabs/go-procfs/procfs"
 	pb "github.com/siderolabs/siderolink/api/siderolink"
 	"github.com/stretchr/testify/assert"
@@ -23,7 +22,6 @@ import (
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/ctest"
 	siderolinkctrl "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/siderolink"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
-	"github.com/siderolabs/talos/pkg/machinery/fipsmode"
 	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"github.com/siderolabs/talos/pkg/machinery/resources/hardware"
@@ -34,10 +32,6 @@ import (
 
 func TestManagerSuite(t *testing.T) {
 	t.Parallel()
-
-	if fipsmode.Strict() {
-		t.Skip("skipping test in strict FIPS mode")
-	}
 
 	suite.Run(t, &ManagerSuite{})
 }
@@ -119,7 +113,8 @@ func (suite *ManagerSuite) TestReconcile() {
 
 	nodeAddress := netip.MustParsePrefix(mockNodeAddressPrefix)
 
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		network.LayeredID(network.ConfigOperator, network.AddressID(constants.SideroLinkName, nodeAddress)),
 		func(r *network.AddressSpec, asrt *assert.Assertions) {
 			address := r.TypedSpec()
@@ -132,7 +127,8 @@ func (suite *ManagerSuite) TestReconcile() {
 		rtestutils.WithNamespace(network.ConfigNamespaceName),
 	)
 
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		network.LayeredID(network.ConfigOperator, network.LinkID(constants.SideroLinkName)),
 		func(r *network.LinkSpec, asrt *assert.Assertions) {
 			link := r.TypedSpec()
@@ -162,15 +158,17 @@ func (suite *ManagerSuite) TestReconcile() {
 	// remove config
 	configPtr := siderolink.NewConfig(config.NamespaceName, siderolink.ConfigID).Metadata()
 	destroyErr := suite.State().Destroy(suite.Ctx(), configPtr,
-		state.WithDestroyOwner(pointer.To(siderolinkctrl.ConfigController{}).Name()))
+		state.WithDestroyOwner(new(siderolinkctrl.ConfigController{}).Name()))
 	suite.Require().NoError(destroyErr)
 
-	ctest.AssertNoResource[*network.LinkSpec](suite,
+	ctest.AssertNoResource[*network.LinkSpec](
+		suite,
 		network.LayeredID(network.ConfigOperator, network.LinkID(constants.SideroLinkName)),
 		rtestutils.WithNamespace(network.ConfigNamespaceName),
 	)
 
-	ctest.AssertNoResource[*network.AddressSpec](suite,
+	ctest.AssertNoResource[*network.AddressSpec](
+		suite,
 		network.LayeredID(network.ConfigOperator, network.AddressID(constants.SideroLinkName, nodeAddress)),
 		rtestutils.WithNamespace(network.ConfigNamespaceName),
 	)
@@ -179,7 +177,8 @@ func (suite *ManagerSuite) TestReconcile() {
 func (suite *ManagerSuite) TestMultipleEndpoints() {
 	suite.initialSetup(mockServerEndpoint1, mockServerEndpoint2)
 
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		network.LayeredID(network.ConfigOperator, network.LinkID(constants.SideroLinkName)),
 		func(r *network.LinkSpec, asrt *assert.Assertions) {
 			link := r.TypedSpec()
@@ -195,7 +194,8 @@ func (suite *ManagerSuite) TestMultipleEndpoints() {
 func (suite *ManagerSuite) TestResolveEndpoints() {
 	suite.initialSetup(mockServerEndpoint2)
 
-	ctest.AssertResource(suite,
+	ctest.AssertResource(
+		suite,
 		network.LayeredID(network.ConfigOperator, network.LinkID(constants.SideroLinkName)),
 		func(r *network.LinkSpec, asrt *assert.Assertions) {
 			link := r.TypedSpec()

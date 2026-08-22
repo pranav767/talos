@@ -14,8 +14,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/siderolabs/go-pointer"
-
 	coreconfig "github.com/siderolabs/talos/pkg/machinery/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/container"
@@ -25,8 +23,6 @@ import (
 )
 
 // Input holds info about certs, ips, and node type.
-//
-//nolint:maligned
 type Input struct {
 	Options Options
 
@@ -75,11 +71,11 @@ func NewInput(clustername, endpoint, kubernetesVersion string, opts ...Option) (
 	var podNet, serviceNet string
 
 	if addr, addrErr := netip.ParseAddr(endpoint); addrErr == nil && addr.Is6() {
-		podNet = constants.DefaultIPv6PodNet
-		serviceNet = constants.DefaultIPv6ServiceNet
+		podNet = constants.DefaultIPv6PodCIDR
+		serviceNet = constants.DefaultIPv6ServiceCIDR
 	} else {
-		podNet = constants.DefaultIPv4PodNet
-		serviceNet = constants.DefaultIPv4ServiceNet
+		podNet = constants.DefaultIPv4PodCIDR
+		serviceNet = constants.DefaultIPv4ServiceCIDR
 	}
 
 	if input.Options.SecretsBundle == nil {
@@ -94,7 +90,7 @@ func NewInput(clustername, endpoint, kubernetesVersion string, opts ...Option) (
 	additionalSubjectAltNames := slices.Clone(input.Options.AdditionalSubjectAltNames)
 
 	if input.Options.DiscoveryEnabled == nil {
-		input.Options.DiscoveryEnabled = pointer.To(true)
+		input.Options.DiscoveryEnabled = new(true)
 	}
 
 	input.ClusterName = clustername
@@ -104,7 +100,10 @@ func NewInput(clustername, endpoint, kubernetesVersion string, opts ...Option) (
 	input.PodNet = []string{podNet}
 	input.ServiceNet = []string{serviceNet}
 	input.ControlPlaneEndpoint = endpoint
-	input.KubernetesVersion = kubernetesVersion
+
+	if input.KubernetesVersion == "" {
+		return nil, errors.New("kubernetes version must be specified")
+	}
 
 	return input, nil
 }
@@ -134,13 +133,4 @@ func (in *Input) Config(t machine.Type) (coreconfig.Provider, error) {
 	}
 
 	return container.New(documents...)
-}
-
-// emptyIf returns empty string if the 2nd argument is empty string, otherwise returns the first argument.
-func emptyIf(str, check string) string {
-	if check == "" {
-		return ""
-	}
-
-	return str
 }

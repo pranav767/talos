@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/mdlayher/ethtool"
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v4"
@@ -22,6 +21,8 @@ import (
 )
 
 func TestLinkStatusMarshalYAML(t *testing.T) {
+	t.Parallel()
+
 	hwAddr, err := net.ParseMAC("01:23:45:67:89:ab")
 	require.NoError(t, err)
 
@@ -65,7 +66,7 @@ func TestLinkStatusMarshalYAML(t *testing.T) {
 			LACPRate:        nethelpers.LACPRateFast,
 			ARPValidate:     nethelpers.ARPValidateAll,
 			ARPAllTargets:   nethelpers.ARPAllTargetsAny,
-			PrimaryIndex:    pointer.To[uint32](3),
+			PrimaryIndex:    new(uint32(3)),
 			PrimaryReselect: nethelpers.PrimaryReselectBetter,
 			FailOverMac:     nethelpers.FailOverMACFollow,
 			ADSelect:        nethelpers.ADSelectCount,
@@ -84,6 +85,9 @@ func TestLinkStatusMarshalYAML(t *testing.T) {
 			ADActorSysPrio:  6,
 			ADUserPortKey:   7,
 			PeerNotifyDelay: 40,
+		},
+		VRFMaster: network.VRFMasterSpec{
+			Table: 123,
 		},
 		Wireguard: network.WireguardSpec{
 			PublicKey:    "bar=",
@@ -120,8 +124,8 @@ masterIndex: 4
 operationalState: lowerLayerDown
 kind: bridge
 slaveKind: ether
-busPath: "00:11:22"
-pciID: "0000:00:00.0"
+busPath: '00:11:22'
+pciID: '0000:00:00.0'
 driver: bonding
 driverVersion: 1.0.0
 firmwareVersion: 3.1.5
@@ -144,7 +148,7 @@ bondMaster:
     arpAllTargets: any
     primary: 3
     primaryReselect: better
-    failOverMac: 2
+    failOverMac: follow
     adSelect: count
     miimon: 33
     updelay: 100
@@ -161,6 +165,8 @@ bondMaster:
     adActorSysPrio: 6
     adUserPortKey: 7
     peerNotifyDelay: 40
+vrfMaster:
+    table: "123"
 wireguard:
     publicKey: bar=
     listenPort: 51820

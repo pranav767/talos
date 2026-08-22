@@ -9,12 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/siderolabs/go-pointer"
+	"github.com/siderolabs/gen/xslices"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/siderolabs/talos/pkg/machinery/config"
+	"github.com/siderolabs/talos/pkg/machinery/config/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/container"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/cri"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/meta"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/network"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
@@ -163,7 +165,7 @@ func TestHostnameBridging(t *testing.T) {
 							NetworkHostname: "my-machine",
 						},
 						MachineFeatures: &v1alpha1.FeaturesConfig{
-							StableHostname: pointer.To(true),
+							StableHostname: new(true),
 						},
 					},
 				})
@@ -207,7 +209,7 @@ func TestHostnameBridging(t *testing.T) {
 
 			cfg: func(*testing.T) config.Config {
 				hc := network.NewHostnameConfigV1Alpha1()
-				hc.ConfigAuto = pointer.To(nethelpers.AutoHostnameKindStable)
+				hc.ConfigAuto = new(nethelpers.AutoHostnameKindStable)
 
 				c, err := container.New(
 					hc,
@@ -262,7 +264,7 @@ func TestResolverBridging(t *testing.T) {
 						MachineNetwork: &v1alpha1.NetworkConfig{
 							NameServers:                []string{"2.2.2.2", "3.3.3.3"},
 							Searches:                   []string{"universe.com", "galaxy.org"},
-							NetworkDisableSearchDomain: pointer.To(true),
+							NetworkDisableSearchDomain: new(true),
 						},
 					},
 				})
@@ -292,15 +294,15 @@ func TestResolverBridging(t *testing.T) {
 				rc := network.NewResolverConfigV1Alpha1()
 				rc.ResolverNameservers = []network.NameserverConfig{
 					{
-						Address: network.Addr{Addr: netip.MustParseAddr("2.2.2.2")},
+						Address: meta.Addr{Addr: netip.MustParseAddr("2.2.2.2")},
 					},
 					{
-						Address: network.Addr{Addr: netip.MustParseAddr("3.3.3.3")},
+						Address: meta.Addr{Addr: netip.MustParseAddr("3.3.3.3")},
 					},
 				}
 				rc.ResolverSearchDomains = network.SearchDomainsConfig{
 					SearchDomains:        []string{"universe.com", "galaxy.org"},
-					SearchDisableDefault: pointer.To(true),
+					SearchDisableDefault: new(true),
 				}
 
 				c, err := container.New(
@@ -322,10 +324,10 @@ func TestResolverBridging(t *testing.T) {
 				rc := network.NewResolverConfigV1Alpha1()
 				rc.ResolverNameservers = []network.NameserverConfig{
 					{
-						Address: network.Addr{Addr: netip.MustParseAddr("2.2.2.2")},
+						Address: meta.Addr{Addr: netip.MustParseAddr("2.2.2.2")},
 					},
 					{
-						Address: network.Addr{Addr: netip.MustParseAddr("3.3.3.3")},
+						Address: meta.Addr{Addr: netip.MustParseAddr("3.3.3.3")},
 					},
 				}
 
@@ -356,8 +358,20 @@ func TestResolverBridging(t *testing.T) {
 
 			require.NotNil(t, resolverConfig)
 
-			assert.Equal(t, test.expectedNameservers, resolverConfig.Resolvers())
-			assert.Equal(t, test.expectedSearchDomains, resolverConfig.SearchDomains())
+			assert.Equal(t, xslices.Map(test.expectedNameservers, func(addr netip.Addr) config.NetworkResolver {
+				return config.NetworkResolver{
+					Addr:     addr,
+					Protocol: nethelpers.DNSProtocolDefault,
+				}
+			}), resolverConfig.Resolvers())
+
+			searchDomains := resolverConfig.SearchDomains()
+			if test.expectedSearchDomains == nil {
+				assert.False(t, searchDomains.IsPresent())
+			} else {
+				assert.Equal(t, test.expectedSearchDomains, searchDomains.ValueOrZero())
+			}
+
 			assert.Equal(t, test.expectedDisableSearch, resolverConfig.DisableSearchDomain())
 		})
 	}
@@ -383,7 +397,7 @@ func TestTimeSyncBridging(t *testing.T) {
 				return container.NewV1Alpha1(&v1alpha1.Config{
 					MachineConfig: &v1alpha1.MachineConfig{
 						MachineTime: &v1alpha1.TimeConfig{
-							TimeDisabled:    pointer.To(true),
+							TimeDisabled:    new(true),
 							TimeServers:     []string{"time1.example.com", "time2.example.com"},
 							TimeBootTimeout: 30 * time.Second,
 						},
@@ -474,6 +488,326 @@ func TestTimeSyncBridging(t *testing.T) {
 			assert.Equal(t, test.expectedTimeservers, timesyncConfig.Servers())
 			assert.Equal(t, test.expectedDisabled, timesyncConfig.Disabled())
 			assert.Equal(t, test.expectedBootTimeout, timesyncConfig.BootTimeout())
+		})
+	}
+}
+
+func TestKubeSpanBridging(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+
+		cfg func(*testing.T) config.Config
+
+		expectedKubeSpanExists  bool
+		expectedKubeSpanEnabled bool
+	}{
+		{
+			name: "v1alpha1 only",
+
+			cfg: func(*testing.T) config.Config {
+				return container.NewV1Alpha1(&v1alpha1.Config{
+					MachineConfig: &v1alpha1.MachineConfig{
+						MachineNetwork: &v1alpha1.NetworkConfig{
+							NetworkKubeSpan: &v1alpha1.NetworkKubeSpan{
+								KubeSpanEnabled: new(true),
+							},
+						},
+					},
+				})
+			},
+
+			expectedKubeSpanExists:  true,
+			expectedKubeSpanEnabled: true,
+		},
+		{
+			name: "v1alpha1 empty",
+
+			cfg: func(*testing.T) config.Config {
+				return container.NewV1Alpha1(&v1alpha1.Config{
+					MachineConfig: &v1alpha1.MachineConfig{},
+				})
+			},
+
+			expectedKubeSpanExists:  false,
+			expectedKubeSpanEnabled: false,
+		},
+		{
+			name: "new style only",
+
+			cfg: func(*testing.T) config.Config {
+				kc := network.NewKubeSpanV1Alpha1()
+				kc.ConfigEnabled = new(true)
+
+				c, err := container.New(
+					kc,
+				)
+				require.NoError(t, err)
+
+				return c
+			},
+
+			expectedKubeSpanExists:  true,
+			expectedKubeSpanEnabled: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := test.cfg(t)
+
+			kubespanConfig := cfg.NetworkKubeSpanConfig()
+
+			if !test.expectedKubeSpanExists {
+				require.Nil(t, kubespanConfig)
+
+				return
+			}
+
+			require.NotNil(t, kubespanConfig)
+
+			assert.Equal(t, test.expectedKubeSpanEnabled, kubespanConfig.Enabled())
+		})
+	}
+}
+
+func TestHostDNSConfigBridging(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+
+		cfg func(*testing.T) config.Config
+
+		expectedHostDNSConfigExists bool
+		expectedHostDNSEnabled      bool
+	}{
+		{
+			name: "v1alpha1 empty",
+
+			cfg: func(*testing.T) config.Config {
+				return container.NewV1Alpha1(&v1alpha1.Config{
+					MachineConfig: &v1alpha1.MachineConfig{},
+				})
+			},
+
+			expectedHostDNSConfigExists: false,
+		},
+		{
+			name: "v1alpha1 hostDNS enabled",
+
+			cfg: func(*testing.T) config.Config {
+				return container.NewV1Alpha1(&v1alpha1.Config{
+					MachineConfig: &v1alpha1.MachineConfig{
+						MachineFeatures: &v1alpha1.FeaturesConfig{
+							HostDNSSupport: &v1alpha1.HostDNSConfig{ //nolint:staticcheck // testing legacy features
+								HostDNSConfigEnabled: new(true),
+							},
+						},
+					},
+				})
+			},
+
+			expectedHostDNSConfigExists: true,
+			expectedHostDNSEnabled:      true,
+		},
+		{
+			name: "resolver config hostDNS enabled",
+
+			cfg: func(*testing.T) config.Config {
+				resolverCfg := network.NewResolverConfigV1Alpha1()
+				resolverCfg.ResolverHostDNS = network.HostDNSConfig{
+					HostDNSEnabled:              new(true),
+					HostDNSForwardKubeDNSToHost: new(true),
+					HostDNSResolveMemberNames:   new(true),
+				}
+
+				c, err := container.New(
+					resolverCfg,
+				)
+				require.NoError(t, err)
+
+				return c
+			},
+
+			expectedHostDNSConfigExists: true,
+			expectedHostDNSEnabled:      true,
+		},
+		{
+			name: "v1alpha1 empty and resolver config hostDNS enabled",
+
+			cfg: func(*testing.T) config.Config {
+				v1alpha1Cfg := &v1alpha1.Config{
+					MachineConfig: &v1alpha1.MachineConfig{},
+				}
+
+				resolverCfg := network.NewResolverConfigV1Alpha1()
+				resolverCfg.ResolverHostDNS = network.HostDNSConfig{
+					HostDNSEnabled:              new(true),
+					HostDNSForwardKubeDNSToHost: new(true),
+					HostDNSResolveMemberNames:   new(true),
+				}
+
+				c, err := container.New(
+					v1alpha1Cfg,
+					resolverCfg,
+				)
+				require.NoError(t, err)
+
+				return c
+			},
+
+			expectedHostDNSConfigExists: true,
+			expectedHostDNSEnabled:      true,
+		},
+		{
+			name: "v1alpha1 hostDNS enabled and resolver empty",
+
+			cfg: func(*testing.T) config.Config {
+				v1alpha1Cfg := &v1alpha1.Config{
+					MachineConfig: &v1alpha1.MachineConfig{
+						MachineFeatures: &v1alpha1.FeaturesConfig{
+							HostDNSSupport: &v1alpha1.HostDNSConfig{ //nolint:staticcheck // testing legacy features
+								HostDNSConfigEnabled: new(true),
+							},
+						},
+					},
+				}
+
+				resolverCfg := network.NewResolverConfigV1Alpha1()
+
+				c, err := container.New(
+					v1alpha1Cfg,
+					resolverCfg,
+				)
+				require.NoError(t, err)
+
+				return c
+			},
+
+			expectedHostDNSConfigExists: true,
+			expectedHostDNSEnabled:      true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := test.cfg(t)
+
+			hostDNSConfig := cfg.NetworkHostDNSConfig()
+
+			if !test.expectedHostDNSConfigExists {
+				require.Nil(t, hostDNSConfig)
+
+				return
+			}
+
+			require.NotNil(t, hostDNSConfig)
+
+			assert.Equal(t, test.expectedHostDNSEnabled, hostDNSConfig.HostDNSEnabled())
+		})
+	}
+}
+
+func TestImageCacheConfigBridging(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+
+		cfg func(*testing.T) config.Config
+
+		expectedImageCacheConfigExists bool
+		expectedImageCacheEnabled      bool
+	}{
+		{
+			name: "v1alpha1 empty",
+
+			cfg: func(*testing.T) config.Config {
+				return container.NewV1Alpha1(&v1alpha1.Config{
+					MachineConfig: &v1alpha1.MachineConfig{},
+				})
+			},
+
+			expectedImageCacheConfigExists: false,
+		},
+		{
+			name: "v1alpha1 image cache enabled",
+
+			cfg: func(*testing.T) config.Config {
+				return container.NewV1Alpha1(&v1alpha1.Config{
+					MachineConfig: &v1alpha1.MachineConfig{
+						MachineFeatures: &v1alpha1.FeaturesConfig{
+							ImageCacheSupport: &v1alpha1.ImageCacheConfig{ //nolint:staticcheck // testing legacy features
+								CacheLocalEnabled: new(true),
+							},
+						},
+					},
+				})
+			},
+
+			expectedImageCacheConfigExists: true,
+			expectedImageCacheEnabled:      true,
+		},
+		{
+			name: "multi-doc image cache config enabled",
+
+			cfg: func(*testing.T) config.Config {
+				cacheCfg := cri.NewImageCacheConfigV1Alpha1()
+				cacheCfg.LocalConfig.ConfigEnabled = new(true)
+
+				c, err := container.New(
+					cacheCfg,
+				)
+				require.NoError(t, err)
+
+				return c
+			},
+
+			expectedImageCacheConfigExists: true,
+			expectedImageCacheEnabled:      true,
+		},
+		{
+			name: "v1alpha1 empty and image cache config enabled",
+
+			cfg: func(*testing.T) config.Config {
+				v1alpha1Cfg := &v1alpha1.Config{
+					MachineConfig: &v1alpha1.MachineConfig{},
+				}
+
+				cacheCfg := cri.NewImageCacheConfigV1Alpha1()
+				cacheCfg.LocalConfig.ConfigEnabled = new(true)
+
+				c, err := container.New(
+					v1alpha1Cfg,
+					cacheCfg,
+				)
+				require.NoError(t, err)
+
+				return c
+			},
+
+			expectedImageCacheConfigExists: true,
+			expectedImageCacheEnabled:      true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := test.cfg(t)
+
+			imageCacheConfig := cfg.ImageCacheConfig()
+
+			if !test.expectedImageCacheConfigExists {
+				require.Nil(t, imageCacheConfig)
+
+				return
+			}
+
+			require.NotNil(t, imageCacheConfig)
+
+			assert.Equal(t, test.expectedImageCacheEnabled, imageCacheConfig.LocalEnabled())
 		})
 	}
 }

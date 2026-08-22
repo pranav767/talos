@@ -5,6 +5,7 @@
 package profile
 
 import (
+	"github.com/siderolabs/talos/pkg/machinery/imager/imageropts"
 	"github.com/siderolabs/talos/pkg/machinery/imager/quirks"
 )
 
@@ -41,9 +42,17 @@ type ImageOptions struct {
 	DiskFormat DiskFormat `yaml:"diskFormat,omitempty"`
 	// DiskFormatOptions are additional options for the disk format
 	DiskFormatOptions string `yaml:"diskFormatOptions,omitempty"`
+	// DiskSectorSize is the sector size for the disk image (bytes).
+	//
+	// If not set, it defaults to 512 bytes.
+	DiskSectorSize uint `yaml:"diskSectorSize,omitempty"`
 	// Bootloader is the bootloader to use for the disk image.
 	// If not set, it defaults to dual-boot.
 	Bootloader BootloaderKind `yaml:"bootloader,omitempty"`
+	// SDBootEnrollKeys is a value in loader.conf secure-boot-enroll: off, manual, if-safe, force.
+	//
+	// If not set, it defaults to if-safe. Only used when SecureBoot is enabled.
+	SDBootEnrollKeys SDBootEnrollKeys `yaml:"sdBootEnrollKeys,omitempty"`
 }
 
 // ISOOptions describes options for the 'iso' output.
@@ -109,18 +118,14 @@ const (
 )
 
 // BootloaderKind is a bootloader for the disk image.
-type BootloaderKind int
+type BootloaderKind = imageropts.BootloaderKind
 
+// BootloaderKind values re-exported from imageropts.
 const (
-	// BootLoaderKindNone is the zero value.
-	BootLoaderKindNone BootloaderKind = iota // none
-	// BootLoaderKindDualBoot is the dual-boot bootloader.
-	// using sd-boot for UEFI and GRUB for BIOS.
-	BootLoaderKindDualBoot // dual-boot
-	// BootLoaderKindSDBoot is the sd-boot bootloader.
-	BootLoaderKindSDBoot // sd-boot
-	// BootLoaderKindGrub is the GRUB bootloader.
-	BootLoaderKindGrub // grub
+	BootLoaderKindNone     = imageropts.BootLoaderKindNone
+	BootLoaderKindDualBoot = imageropts.BootLoaderKindDualBoot
+	BootLoaderKindSDBoot   = imageropts.BootLoaderKindSDBoot
+	BootLoaderKindGrub     = imageropts.BootLoaderKindGrub
 )
 
 // FillDefaults fills default values for the output.

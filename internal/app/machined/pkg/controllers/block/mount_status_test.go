@@ -41,17 +41,22 @@ func (suite *MountStatusSuite) TestReconcile() {
 		VolumeID:     "volume1",
 		Requesters:   []string{"requester1", "requester2"},
 		RequesterIDs: []string{"requester1/volume1", "requester2/volume1"},
+		Secure:       true,
+		NoExec:       true,
 	}
 	mountStatus1.TypedSpec().Target = "/target"
 	suite.Create(mountStatus1)
 
 	// mount status is exploded into volume mount statuses
-	ctest.AssertResources(suite,
+	ctest.AssertResources(
+		suite,
 		[]resource.ID{"requester1/volume1", "requester2/volume1"},
 		func(vms *block.VolumeMountStatus, asrt *assert.Assertions) {
 			asrt.Equal("volume1", vms.Metadata().Labels().Raw()["mount-status-id"])
 			asrt.Equal("volume1", vms.TypedSpec().VolumeID)
 			asrt.Equal("/target", vms.TypedSpec().Target)
+			asrt.True(vms.TypedSpec().Secure)
+			asrt.True(vms.TypedSpec().NoExec)
 		},
 	)
 
@@ -96,17 +101,22 @@ func (suite *MountStatusSuite) TestReconcileRequesterGoingOut() {
 		VolumeID:     "volume1",
 		Requesters:   []string{"requester1", "requester2"},
 		RequesterIDs: []string{"requester1/volume1", "requester2/volume1"},
+		Secure:       true,
+		NoExec:       true,
 	}
 	mountStatus1.TypedSpec().Target = "/target"
 	suite.Create(mountStatus1)
 
 	// mount status is exploded into volume mount statuses
-	ctest.AssertResources(suite,
+	ctest.AssertResources(
+		suite,
 		[]resource.ID{"requester1/volume1", "requester2/volume1"},
 		func(vms *block.VolumeMountStatus, asrt *assert.Assertions) {
 			asrt.Equal("volume1", vms.Metadata().Labels().Raw()["mount-status-id"])
 			asrt.Equal("volume1", vms.TypedSpec().VolumeID)
 			asrt.Equal("/target", vms.TypedSpec().Target)
+			asrt.True(vms.TypedSpec().Secure)
+			asrt.True(vms.TypedSpec().NoExec)
 		},
 	)
 
@@ -131,4 +141,76 @@ func (suite *MountStatusSuite) TestReconcileRequesterGoingOut() {
 
 	// volume mount status should be destroyed
 	ctest.AssertNoResource[*block.VolumeMountStatus](suite, "requester1/volume1")
+}
+
+// TestReconcileRequesterComingBack covers a requester (e.g. a service being restarted) going away and
+// immediately coming back while its previous volume mount status is still tearing down.
+//
+// The controller should not fail on the conflict, as that would block volume mounts for every other
+// requester and every other mount status on the machine.
+func (suite *MountStatusSuite) TestReconcileRequesterComingBack() {
+	mountStatus1 := block.NewMountStatus(block.NamespaceName, "volume1")
+	mountStatus1.TypedSpec().Spec = block.MountRequestSpec{
+		VolumeID:     "volume1",
+		Requesters:   []string{"requester1"},
+		RequesterIDs: []string{"requester1/volume1"},
+	}
+	mountStatus1.TypedSpec().Target = "/target1"
+	suite.Create(mountStatus1)
+
+	ctest.AssertResource(suite, "requester1/volume1", func(vms *block.VolumeMountStatus, asrt *assert.Assertions) {
+		asrt.Equal(resource.PhaseRunning, vms.Metadata().Phase())
+	})
+
+	// the requester locks the volume mount status
+	suite.AddFinalizer(block.NewVolumeMountStatus(block.NamespaceName, "requester1/volume1").Metadata(), "test-finalizer")
+
+	// the requester goes away, the volume mount status starts tearing down, but it is still locked
+	mountStatus1, err := safe.StateGetByID[*block.MountStatus](suite.Ctx(), suite.State(), mountStatus1.Metadata().ID())
+	suite.Require().NoError(err)
+
+	mountStatus1.TypedSpec().Spec.Requesters = nil
+	mountStatus1.TypedSpec().Spec.RequesterIDs = nil
+	suite.Update(mountStatus1)
+
+	ctest.AssertResource(suite, "requester1/volume1", func(vms *block.VolumeMountStatus, asrt *assert.Assertions) {
+		asrt.Equal(resource.PhaseTearingDown, vms.Metadata().Phase())
+	})
+
+	// the requester comes back before the volume mount status is destroyed
+	mountStatus1, err = safe.StateGetByID[*block.MountStatus](suite.Ctx(), suite.State(), mountStatus1.Metadata().ID())
+	suite.Require().NoError(err)
+
+	mountStatus1.TypedSpec().Spec.Requesters = []string{"requester1"}
+	mountStatus1.TypedSpec().Spec.RequesterIDs = []string{"requester1/volume1"}
+	suite.Update(mountStatus1)
+
+	// the controller should keep running: a mount status sorting after "volume1" should still be reconciled
+	mountStatus2 := block.NewMountStatus(block.NamespaceName, "volume2")
+	mountStatus2.TypedSpec().Spec = block.MountRequestSpec{
+		VolumeID:     "volume2",
+		Requesters:   []string{"requester2"},
+		RequesterIDs: []string{"requester2/volume2"},
+	}
+	mountStatus2.TypedSpec().Target = "/target2"
+	suite.Create(mountStatus2)
+
+	ctest.AssertResource(suite, "requester2/volume2", func(vms *block.VolumeMountStatus, asrt *assert.Assertions) {
+		asrt.Equal(resource.PhaseRunning, vms.Metadata().Phase())
+		asrt.Equal("/target2", vms.TypedSpec().Target)
+	})
+
+	// the stuck volume mount status is still tearing down, as the finalizer is still there
+	ctest.AssertResource(suite, "requester1/volume1", func(vms *block.VolumeMountStatus, asrt *assert.Assertions) {
+		asrt.Equal(resource.PhaseTearingDown, vms.Metadata().Phase())
+	})
+
+	// once the requester releases the previous volume mount status, it should be destroyed and re-created
+	suite.RemoveFinalizer(block.NewVolumeMountStatus(block.NamespaceName, "requester1/volume1").Metadata(), "test-finalizer")
+
+	ctest.AssertResource(suite, "requester1/volume1", func(vms *block.VolumeMountStatus, asrt *assert.Assertions) {
+		asrt.Equal(resource.PhaseRunning, vms.Metadata().Phase())
+		asrt.True(vms.Metadata().Finalizers().Empty())
+		asrt.Equal("/target1", vms.TypedSpec().Target)
+	})
 }

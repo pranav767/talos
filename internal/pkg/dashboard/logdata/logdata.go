@@ -18,8 +18,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/siderolabs/talos/cmd/talosctl/pkg/talos/helpers"
-	"github.com/siderolabs/talos/internal/pkg/dashboard/resolver"
-	"github.com/siderolabs/talos/internal/pkg/dashboard/util"
+	"github.com/siderolabs/talos/internal/pkg/dashboard/utils"
 	"github.com/siderolabs/talos/pkg/machinery/api/common"
 	"github.com/siderolabs/talos/pkg/machinery/client"
 )
@@ -35,7 +34,7 @@ type Data struct {
 type Source struct {
 	client *client.Client
 
-	resolver resolver.Resolver
+	nodes []string
 
 	logCtxCancel context.CancelFunc
 
@@ -45,12 +44,17 @@ type Source struct {
 	LogCh chan Data
 }
 
+// logChBuffer is the capacity of LogCh. A generous buffer lets the sender
+// continue during UI-update bursts while the drain loop in the dashboard
+// handler batches the queued lines into a single QueueUpdate closure.
+const logChBuffer = 256
+
 // NewSource initializes and returns Source data source.
-func NewSource(client *client.Client, resolver resolver.Resolver) *Source {
+func NewSource(client *client.Client, nodes []string) *Source {
 	return &Source{
-		client:   client,
-		resolver: resolver,
-		LogCh:    make(chan Data),
+		client: client,
+		nodes:  nodes,
+		LogCh:  make(chan Data, logChBuffer),
 	}
 }
 
@@ -71,9 +75,9 @@ func (source *Source) Stop() error {
 func (source *Source) start(ctx context.Context) {
 	ctx, source.logCtxCancel = context.WithCancel(ctx)
 
-	for _, nodeContext := range util.NodeContexts(ctx) {
+	for _, node := range source.nodes {
 		source.eg.Go(func() error {
-			return source.tailNodeWithRetries(nodeContext.Ctx, nodeContext.Node)
+			return source.tailNodeWithRetries(utils.NodeContext(ctx, node), node)
 		})
 	}
 }
@@ -86,9 +90,7 @@ func (source *Source) tailNodeWithRetries(ctx context.Context, node string) erro
 		}
 
 		if readErr != nil {
-			resolved := source.resolver.Resolve(node)
-
-			source.LogCh <- Data{Node: resolved, Error: readErr.Error()}
+			source.LogCh <- Data{Node: node, Error: readErr.Error()}
 		}
 
 		// back off a bit before retrying

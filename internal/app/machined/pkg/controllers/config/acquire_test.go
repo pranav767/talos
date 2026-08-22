@@ -22,6 +22,7 @@ import (
 
 	"github.com/cosi-project/runtime/pkg/resource"
 	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
+	"github.com/cosi-project/runtime/pkg/safe"
 	"github.com/cosi-project/runtime/pkg/state"
 	"github.com/klauspost/compress/zstd"
 	"github.com/siderolabs/go-procfs/procfs"
@@ -180,7 +181,7 @@ func TestAcquireSuite(t *testing.T) {
 		}
 
 		s.clusterName = fmt.Sprintf("cluster-%d", rand.Int32())
-		input, err := generate.NewInput(s.clusterName, "https://localhost:6443", "")
+		input, err := generate.NewInput(s.clusterName, "https://localhost:6443", constants.DefaultKubernetesVersion)
 		s.Require().NoError(err)
 
 		cfg, err := input.Config(machine.TypeControlPlane)
@@ -263,7 +264,19 @@ func (suite *AcquireSuite) injectViaMaintenance(cfg []byte) {
 	mCfg, err := configloader.NewFromBytes(cfg)
 	suite.Require().NoError(err)
 
-	suite.Require().NoError(suite.State().Create(suite.Ctx(), configresource.NewMachineConfigWithID(mCfg, configresource.MaintenanceID)))
+	existingCfg, err := safe.StateGetByID[*configresource.MachineConfig](suite.Ctx(), suite.State(), configresource.ActiveID)
+	if err != nil && !state.IsNotFoundError(err) {
+		suite.Require().NoError(err)
+	}
+
+	newCfg := configresource.NewMachineConfigWithID(mCfg, configresource.ActiveID)
+
+	if existingCfg == nil {
+		suite.Create(newCfg)
+	} else {
+		newCfg.Metadata().SetVersion(existingCfg.Metadata().Version())
+		suite.Update(newCfg)
+	}
 
 	_, err = suite.State().WatchFor(suite.Ctx(), runtime.NewMaintenanceServiceRequest().Metadata(), state.WithEventTypes(state.Destroyed))
 	suite.Require().NoError(err)
@@ -313,7 +326,7 @@ func (suite *AcquireSuite) TestFromDisk() {
 	suite.injectViaDisk(suite.completeMachineConfig, true)
 
 	cfg := suite.waitForConfig(false)
-	suite.Require().Equal(cfg.Cluster().Name(), suite.clusterName)
+	suite.Require().Equal(cfg.K8sClusterConfig().ClusterName(), suite.clusterName)
 
 	suite.Assert().Empty(suite.eventPublisher.getEvents())
 	suite.Assert().Equal(
@@ -349,10 +362,15 @@ func (suite *AcquireSuite) TestFromDiskFailure() {
 	ev := suite.platformEvent.getEvents()[0]
 	suite.Assert().Equal(platform.EventTypeFailure, ev.Type)
 	suite.Assert().Equal("Error loading and validating Talos machine config.", ev.Message)
-	suite.Assert().Equal("failed to load \"config.yaml\" from STATE: unknown keys found during decoding:\naaaversion: v1alpha1 # Indicates the schema used to decode the contents.\n", ev.Error.Error())
+	suite.Assert().Equal(
+		"failed to load \"config.yaml\" from STATE: error decoding document /v1alpha1/ (line 1): unknown keys found during decoding:\n"+
+			"aaaversion: v1alpha1 # Indicates the schema used to decode the contents.\n",
+		ev.Error.Error(),
+	)
 
 	suite.Assert().Equal(&machineapi.ConfigLoadErrorEvent{
-		Error: "failed to load \"config.yaml\" from STATE: unknown keys found during decoding:\naaaversion: v1alpha1 # Indicates the schema used to decode the contents.\n",
+		Error: "failed to load \"config.yaml\" from STATE: error decoding document /v1alpha1/ (line 1): unknown keys found during decoding:\n" +
+			"aaaversion: v1alpha1 # Indicates the schema used to decode the contents.\n",
 	}, suite.eventPublisher.getEvents()[0])
 }
 
@@ -379,10 +397,8 @@ func (suite *AcquireSuite) TestFromDiskToMaintenance() {
 
 	suite.Require().Equal(cfg.SideroLink().APIUrl().Host, "siderolink.api")
 
+	// no asserts here, as maintenance injects the config bypassing the controller
 	suite.injectViaMaintenance(suite.completeMachineConfig)
-
-	cfg = suite.waitForConfig(true)
-	suite.Require().Equal(cfg.Cluster().Name(), suite.clusterName)
 
 	suite.Assert().Equal(
 		[]proto.Message{
@@ -397,18 +413,25 @@ func (suite *AcquireSuite) TestFromDiskToMaintenance() {
 		},
 		suite.eventPublisher.getEvents(),
 	)
-	suite.Assert().Equal(
-		[]platform.Event{
-			{
-				Type:    platform.EventTypeActivate,
-				Message: "Talos booted into maintenance mode. Ready for user interaction.",
-			},
-			{
-				Type:    platform.EventTypeConfigLoaded,
-				Message: "Talos machine config loaded successfully.",
-			},
+
+	suite.Assert().EventuallyWithT(
+		func(collect *assert.CollectT) {
+			assert.New(collect).Equal(
+				[]platform.Event{
+					{
+						Type:    platform.EventTypeActivate,
+						Message: "Talos booted into maintenance mode. Ready for user interaction.",
+					},
+					{
+						Type:    platform.EventTypeConfigLoaded,
+						Message: "Talos machine config loaded successfully.",
+					},
+				},
+				suite.platformEvent.getEvents(),
+			)
 		},
-		suite.platformEvent.getEvents(),
+		2*time.Second,
+		10*time.Millisecond,
 	)
 }
 
@@ -420,7 +443,7 @@ func (suite *AcquireSuite) TestFromPlatform() {
 	suite.triggerAcquire()
 
 	cfg := suite.waitForConfig(true)
-	suite.Require().Equal(cfg.Cluster().Name(), suite.clusterName)
+	suite.Require().Equal(cfg.K8sClusterConfig().ClusterName(), suite.clusterName)
 
 	suite.Assert().Empty(suite.eventPublisher.getEvents())
 	suite.Assert().Equal(
@@ -461,7 +484,7 @@ func (suite *AcquireSuite) TestFromPlatformFailure() {
 func (suite *AcquireSuite) TestFromPlatformNotValid() {
 	suite.noStateVolume()
 
-	patchCfg, err := configloader.NewFromBytes([]byte(`{"machine": {"nodeLabels": {"/1": "2"}}}`))
+	patchCfg, err := configloader.NewFromBytes([]byte("apiVersion: v1alpha1\nkind: KubeNodeConfig\nlabels: {'/1': '2'}"))
 	suite.Require().NoError(err)
 
 	out, err := configpatcher.Apply(configpatcher.WithBytes(suite.completeMachineConfig), []configpatcher.Patch{
@@ -490,13 +513,13 @@ func (suite *AcquireSuite) TestFromPlatformNotValid() {
 	suite.Assert().Equal("Error loading and validating Talos machine config.", ev.Message)
 	suite.Assert().Equal(
 		"failed to validate config acquired via platform mock: 1 error occurred:\n"+
-			"\t* v1alpha1.Config: 1 error occurred:\n\t* invalid machine node labels: 1 error occurred:\n\t* prefix cannot be empty: \"/1\"\n\n\n\n\n\n",
+			"\t* KubeNodeConfig: invalid node labels: 1 error occurred:\n\t* prefix cannot be empty: \"/1\"\n\n\n\n",
 		ev.Error.Error(),
 	)
 
 	suite.Assert().Equal(&machineapi.ConfigLoadErrorEvent{
-		Error: "failed to validate config acquired via platform mock: 1 error occurred:" +
-			"\n\t* v1alpha1.Config: 1 error occurred:\n\t* invalid machine node labels: 1 error occurred:\n\t* prefix cannot be empty: \"/1\"\n\n\n\n\n\n",
+		Error: "failed to validate config acquired via platform mock: 1 error occurred:\n" +
+			"\t* KubeNodeConfig: invalid node labels: 1 error occurred:\n\t* prefix cannot be empty: \"/1\"\n\n\n\n",
 	}, suite.eventPublisher.getEvents()[0])
 }
 
@@ -515,7 +538,7 @@ func (suite *AcquireSuite) TestFromPlatformGzip() {
 	suite.triggerAcquire()
 
 	cfg := suite.waitForConfig(true)
-	suite.Require().Equal(cfg.Cluster().Name(), suite.clusterName)
+	suite.Require().Equal(cfg.K8sClusterConfig().ClusterName(), suite.clusterName)
 
 	suite.Assert().Empty(suite.eventPublisher.getEvents())
 	suite.Assert().Equal(
@@ -552,10 +575,8 @@ func (suite *AcquireSuite) TestFromPlatformToMaintenance() {
 
 	suite.Require().Equal(cfg.SideroLink().APIUrl().Host, "siderolink.api")
 
+	// no asserts here, as maintenance injects the config bypassing the controller
 	suite.injectViaMaintenance(suite.completeMachineConfig)
-
-	cfg = suite.waitForConfig(true)
-	suite.Require().Equal(cfg.Cluster().Name(), suite.clusterName)
 
 	suite.Assert().Equal(
 		[]proto.Message{
@@ -570,18 +591,25 @@ func (suite *AcquireSuite) TestFromPlatformToMaintenance() {
 		},
 		suite.eventPublisher.getEvents(),
 	)
-	suite.Assert().Equal(
-		[]platform.Event{
-			{
-				Type:    platform.EventTypeActivate,
-				Message: "Talos booted into maintenance mode. Ready for user interaction.",
-			},
-			{
-				Type:    platform.EventTypeConfigLoaded,
-				Message: "Talos machine config loaded successfully.",
-			},
+
+	suite.Assert().EventuallyWithT(
+		func(collect *assert.CollectT) {
+			assert.New(collect).Equal(
+				[]platform.Event{
+					{
+						Type:    platform.EventTypeActivate,
+						Message: "Talos booted into maintenance mode. Ready for user interaction.",
+					},
+					{
+						Type:    platform.EventTypeConfigLoaded,
+						Message: "Talos machine config loaded successfully.",
+					},
+				},
+				suite.platformEvent.getEvents(),
+			)
 		},
-		suite.platformEvent.getEvents(),
+		2*time.Second,
+		10*time.Millisecond,
 	)
 }
 
@@ -619,10 +647,8 @@ func (suite *AcquireSuite) TestFromCmdlineLateToMaintenance() {
 
 	suite.Require().Equal(cfg.SideroLink().APIUrl().Host, "siderolink.api")
 
+	// no asserts here, as maintenance injects the config bypassing the controller
 	suite.injectViaMaintenance(suite.completeMachineConfig)
-
-	cfg = suite.waitForConfig(true)
-	suite.Require().Equal(cfg.Cluster().Name(), suite.clusterName)
 
 	suite.Assert().Equal(
 		[]proto.Message{
@@ -637,18 +663,25 @@ func (suite *AcquireSuite) TestFromCmdlineLateToMaintenance() {
 		},
 		suite.eventPublisher.getEvents(),
 	)
-	suite.Assert().Equal(
-		[]platform.Event{
-			{
-				Type:    platform.EventTypeActivate,
-				Message: "Talos booted into maintenance mode. Ready for user interaction.",
-			},
-			{
-				Type:    platform.EventTypeConfigLoaded,
-				Message: "Talos machine config loaded successfully.",
-			},
+
+	suite.Assert().EventuallyWithT(
+		func(collect *assert.CollectT) {
+			assert.New(collect).Equal(
+				[]platform.Event{
+					{
+						Type:    platform.EventTypeActivate,
+						Message: "Talos booted into maintenance mode. Ready for user interaction.",
+					},
+					{
+						Type:    platform.EventTypeConfigLoaded,
+						Message: "Talos machine config loaded successfully.",
+					},
+				},
+				suite.platformEvent.getEvents(),
+			)
 		},
-		suite.platformEvent.getEvents(),
+		2*time.Second,
+		10*time.Millisecond,
 	)
 }
 
@@ -689,7 +722,7 @@ func (suite *AcquireSuite) TestFromCmdlineEarlyToPlatform() {
 	suite.Require().Equal(cfg.SideroLink().APIUrl().Host, "siderolink.api")
 
 	cfg = suite.waitForConfig(true)
-	suite.Require().Equal(cfg.Cluster().Name(), suite.clusterName)
+	suite.Require().Equal(cfg.K8sClusterConfig().ClusterName(), suite.clusterName)
 
 	suite.Assert().Empty(suite.eventPublisher.getEvents())
 	suite.Assert().Equal(
@@ -707,10 +740,8 @@ func (suite *AcquireSuite) TestFromMaintenance() {
 	suite.noStateVolume()
 	suite.triggerAcquire()
 
+	// no asserts here, as maintenance injects the config bypassing the controller
 	suite.injectViaMaintenance(suite.completeMachineConfig)
-
-	cfg := suite.waitForConfig(true)
-	suite.Require().Equal(cfg.Cluster().Name(), suite.clusterName)
 
 	suite.Assert().Equal(
 		[]proto.Message{
@@ -725,18 +756,25 @@ func (suite *AcquireSuite) TestFromMaintenance() {
 		},
 		suite.eventPublisher.getEvents(),
 	)
-	suite.Assert().Equal(
-		[]platform.Event{
-			{
-				Type:    platform.EventTypeActivate,
-				Message: "Talos booted into maintenance mode. Ready for user interaction.",
-			},
-			{
-				Type:    platform.EventTypeConfigLoaded,
-				Message: "Talos machine config loaded successfully.",
-			},
+
+	suite.Assert().EventuallyWithT(
+		func(collect *assert.CollectT) {
+			assert.New(collect).Equal(
+				[]platform.Event{
+					{
+						Type:    platform.EventTypeActivate,
+						Message: "Talos booted into maintenance mode. Ready for user interaction.",
+					},
+					{
+						Type:    platform.EventTypeConfigLoaded,
+						Message: "Talos machine config loaded successfully.",
+					},
+				},
+				suite.platformEvent.getEvents(),
+			)
 		},
-		suite.platformEvent.getEvents(),
+		2*time.Second,
+		10*time.Millisecond,
 	)
 }
 
@@ -762,10 +800,8 @@ func (suite *AcquireSuite) TestFromEmbeddedToMaintenance() {
 
 	suite.Require().Equal(cfg.SideroLink().APIUrl().Host, "siderolink.api")
 
+	// no asserts here, as maintenance injects the config bypassing the controller
 	suite.injectViaMaintenance(suite.completeMachineConfig)
-
-	cfg = suite.waitForConfig(true)
-	suite.Require().Equal(cfg.Cluster().Name(), suite.clusterName)
 
 	suite.Assert().Equal(
 		[]proto.Message{
@@ -780,18 +816,25 @@ func (suite *AcquireSuite) TestFromEmbeddedToMaintenance() {
 		},
 		suite.eventPublisher.getEvents(),
 	)
-	suite.Assert().Equal(
-		[]platform.Event{
-			{
-				Type:    platform.EventTypeActivate,
-				Message: "Talos booted into maintenance mode. Ready for user interaction.",
-			},
-			{
-				Type:    platform.EventTypeConfigLoaded,
-				Message: "Talos machine config loaded successfully.",
-			},
+
+	suite.Assert().EventuallyWithT(
+		func(collect *assert.CollectT) {
+			assert.New(collect).Equal(
+				[]platform.Event{
+					{
+						Type:    platform.EventTypeActivate,
+						Message: "Talos booted into maintenance mode. Ready for user interaction.",
+					},
+					{
+						Type:    platform.EventTypeConfigLoaded,
+						Message: "Talos machine config loaded successfully.",
+					},
+				},
+				suite.platformEvent.getEvents(),
+			)
 		},
-		suite.platformEvent.getEvents(),
+		2*time.Second,
+		10*time.Millisecond,
 	)
 }
 

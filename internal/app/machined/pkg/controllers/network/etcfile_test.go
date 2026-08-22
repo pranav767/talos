@@ -11,26 +11,22 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/cosi-project/runtime/pkg/controller/runtime"
 	"github.com/cosi-project/runtime/pkg/resource"
-	"github.com/cosi-project/runtime/pkg/state"
-	"github.com/cosi-project/runtime/pkg/state/impl/inmem"
-	"github.com/cosi-project/runtime/pkg/state/impl/namespaced"
-	"github.com/siderolabs/go-pointer"
 	"github.com/siderolabs/go-retry/retry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
-	"go.uber.org/zap/zaptest"
 
+	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/ctest"
 	netctrl "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/network"
 	v1alpha1runtime "github.com/siderolabs/talos/internal/app/machined/pkg/runtime"
 	"github.com/siderolabs/talos/internal/pkg/mount/v3"
 	"github.com/siderolabs/talos/pkg/machinery/config/container"
+	networkcfg "github.com/siderolabs/talos/pkg/machinery/config/types/network"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
+	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"github.com/siderolabs/talos/pkg/machinery/resources/files"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
@@ -39,39 +35,21 @@ import (
 )
 
 type EtcFileConfigSuite struct {
-	suite.Suite
+	ctest.DefaultSuite
 
-	state state.State
-
-	runtime *runtime.Runtime
-	wg      sync.WaitGroup
-
-	ctx       context.Context //nolint:containedctx
-	ctxCancel context.CancelFunc
-
-	cfg            *config.MachineConfig
-	defaultAddress *network.NodeAddress
-	hostnameStatus *network.HostnameStatus
-	resolverStatus *network.ResolverStatus
-	hostDNSConfig  *network.HostDNSConfig
+	cfg                   *config.MachineConfig
+	defaultAddress        *network.NodeAddress
+	hostnameStatus        *network.HostnameStatus
+	resolverStatus        *network.ResolverStatus
+	hostDNSConfig         *network.HostDNSConfig
+	hostDNSConfigDisabled *network.HostDNSConfig
 
 	bindMountTarget   string
 	podResolvConfPath string
 	etcRoot           xfs.Root
 }
 
-func (suite *EtcFileConfigSuite) SetupTest() {
-	suite.ctx, suite.ctxCancel = context.WithTimeout(context.Background(), 3*time.Minute)
-
-	suite.state = state.WrapCore(namespaced.NewState(inmem.Build))
-
-	var err error
-
-	suite.runtime, err = runtime.NewRuntime(suite.state, zaptest.NewLogger(suite.T()))
-	suite.Require().NoError(err)
-
-	suite.startRuntime()
-
+func (suite *EtcFileConfigSuite) ExtraSetup() {
 	ok, err := v1alpha1runtime.KernelCapabilities().OpentreeOnAnonymousFS()
 	suite.Require().NoError(err)
 
@@ -87,7 +65,7 @@ func (suite *EtcFileConfigSuite) SetupTest() {
 	suite.Require().NoError(suite.etcRoot.OpenFS())
 	suite.Assert().NoFileExists(suite.podResolvConfPath)
 
-	suite.Require().NoError(suite.runtime.RegisterController(&netctrl.EtcFileController{
+	suite.Require().NoError(suite.Runtime().RegisterController(&netctrl.EtcFileController{
 		V1Alpha1Mode:    v1alpha1runtime.ModeMetal,
 		EtcRoot:         suite.etcRoot,
 		BindMountTarget: suite.bindMountTarget,
@@ -101,7 +79,7 @@ func (suite *EtcFileConfigSuite) SetupTest() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineNetwork: &v1alpha1.NetworkConfig{
+					MachineNetwork: &v1alpha1.NetworkConfig{ //nolint:staticcheck // legacy config
 						ExtraHostEntries: []*v1alpha1.ExtraHost{
 							{
 								HostIP:      "10.0.0.1",
@@ -133,11 +111,27 @@ func (suite *EtcFileConfigSuite) SetupTest() {
 	suite.hostnameStatus.TypedSpec().Domainname = "example.com"
 
 	suite.resolverStatus = network.NewResolverStatus(network.NamespaceName, network.ResolverID)
-	suite.resolverStatus.TypedSpec().DNSServers = []netip.Addr{
-		netip.MustParseAddr("1.1.1.1"),
-		netip.MustParseAddr("2.2.2.2"),
-		netip.MustParseAddr("3.3.3.3"),
-		netip.MustParseAddr("4.4.4.4"),
+	suite.resolverStatus.TypedSpec().NameServers = []network.NameServerSpec{
+		{
+			Addr:     netip.MustParseAddr("1.1.1.1"),
+			Protocol: nethelpers.DNSProtocolDefault,
+		},
+		{
+			Addr:     netip.MustParseAddr("2.2.2.2"),
+			Protocol: nethelpers.DNSProtocolDefault,
+		},
+		{
+			Addr:     netip.MustParseAddr("3.3.3.3"),
+			Protocol: nethelpers.DNSProtocolDNSOverTLS,
+		},
+		{
+			Addr:     netip.MustParseAddr("4.4.4.4"),
+			Protocol: nethelpers.DNSProtocolDefault,
+		},
+		{
+			Addr:     netip.MustParseAddr("5.5.5.5"),
+			Protocol: nethelpers.DNSProtocolDefault,
+		},
 	}
 
 	suite.hostDNSConfig = network.NewHostDNSConfig(network.HostDNSConfigID)
@@ -145,14 +139,13 @@ func (suite *EtcFileConfigSuite) SetupTest() {
 	suite.hostDNSConfig.TypedSpec().ListenAddresses = []netip.AddrPort{
 		netip.MustParseAddrPort("127.0.0.53:53"),
 		netip.MustParseAddrPort("169.254.116.108:53"),
+		netip.MustParseAddrPort("[fd54:616c:6f73::204f:5320:444e:531]:53"),
 	}
 	suite.hostDNSConfig.TypedSpec().ServiceHostDNSAddress = netip.MustParseAddr("169.254.116.108")
-}
+	suite.hostDNSConfig.TypedSpec().ServiceHostDNSAddressV6 = netip.MustParseAddr("fd54:616c:6f73::204f:5320:444e:531")
 
-func (suite *EtcFileConfigSuite) startRuntime() {
-	suite.wg.Go(func() {
-		suite.Assert().NoError(suite.runtime.Run(suite.ctx))
-	})
+	suite.hostDNSConfigDisabled = network.NewHostDNSConfig(network.HostDNSConfigID)
+	suite.hostDNSConfigDisabled.TypedSpec().Enabled = false
 }
 
 type etcFileContents struct {
@@ -164,7 +157,7 @@ type etcFileContents struct {
 //nolint:gocyclo
 func (suite *EtcFileConfigSuite) testFiles(resources []resource.Resource, contents etcFileContents) {
 	for _, r := range resources {
-		suite.Require().NoError(suite.state.Create(suite.ctx, r))
+		suite.Create(r)
 	}
 
 	var (
@@ -184,10 +177,8 @@ func (suite *EtcFileConfigSuite) testFiles(resources []resource.Resource, conten
 		unexpectedIDs = append(unexpectedIDs, "hosts")
 	}
 
-	assertResources(
-		suite.ctx,
-		suite.T(),
-		suite.state,
+	ctest.AssertResources(
+		suite,
 		expectedIDs,
 		func(r *files.EtcFileSpec, asrt *assert.Assertions) {
 			switch r.Metadata().ID() {
@@ -198,6 +189,7 @@ func (suite *EtcFileConfigSuite) testFiles(resources []resource.Resource, conten
 			}
 		},
 	)
+
 	suite.Assert().NoError(
 		retry.Constant(10*time.Second, retry.WithUnits(100*time.Millisecond)).Retry(func() error {
 			if contents.resolvGlobalConf == "" {
@@ -231,7 +223,7 @@ func (suite *EtcFileConfigSuite) testFiles(resources []resource.Resource, conten
 	)
 
 	for _, id := range unexpectedIDs {
-		assertNoResource[*files.EtcFileSpec](suite.ctx, suite.T(), suite.state, id)
+		ctest.AssertNoResource[*files.EtcFileSpec](suite, id)
 	}
 }
 
@@ -243,7 +235,20 @@ func (suite *EtcFileConfigSuite) TestComplete() {
 		etcFileContents{
 			hosts:            "127.0.0.1   localhost\n33.11.22.44 foo.example.com foo\n::1         localhost ip6-localhost ip6-loopback\nff02::1     ip6-allnodes\nff02::2     ip6-allrouters\n10.0.0.1    a b\n10.0.0.2    c d\n", //nolint:lll
 			resolvConf:       "nameserver 127.0.0.53\n\nsearch foo.example.com\n",
-			resolvGlobalConf: "nameserver 169.254.116.108\n\nsearch foo.example.com\n",
+			resolvGlobalConf: "nameserver 169.254.116.108\nnameserver fd54:616c:6f73:0:204f:5320:444e:531\n\nsearch foo.example.com\n",
+		},
+	)
+}
+
+func (suite *EtcFileConfigSuite) TestExtraHostsNoHostname() {
+	suite.resolverStatus.TypedSpec().SearchDomains = []string{"foo.example.com"}
+
+	suite.testFiles(
+		[]resource.Resource{suite.cfg, suite.resolverStatus, suite.hostDNSConfig},
+		etcFileContents{
+			hosts:            "127.0.0.1 localhost\n::1       localhost ip6-localhost ip6-loopback\nff02::1   ip6-allnodes\nff02::2   ip6-allrouters\n10.0.0.1  a b\n10.0.0.2  c d\n",
+			resolvConf:       "nameserver 127.0.0.53\n\nsearch foo.example.com\n",
+			resolvGlobalConf: "nameserver 169.254.116.108\nnameserver fd54:616c:6f73:0:204f:5320:444e:531\n\nsearch foo.example.com\n",
 		},
 	)
 }
@@ -256,19 +261,19 @@ func (suite *EtcFileConfigSuite) TestNoExtraHosts() {
 		etcFileContents{
 			hosts:            "127.0.0.1   localhost\n33.11.22.44 foo.example.com foo\n::1         localhost ip6-localhost ip6-loopback\nff02::1     ip6-allnodes\nff02::2     ip6-allrouters\n",
 			resolvConf:       "nameserver 127.0.0.53\n\nsearch foo.example.com\n",
-			resolvGlobalConf: "nameserver 169.254.116.108\n\nsearch foo.example.com\n",
+			resolvGlobalConf: "nameserver 169.254.116.108\nnameserver fd54:616c:6f73:0:204f:5320:444e:531\n\nsearch foo.example.com\n",
 		},
 	)
 }
 
-func (suite *EtcFileConfigSuite) TestNoSearchDomain() {
+func (suite *EtcFileConfigSuite) TestNoSearchDomainLegacy() {
 	cfg := config.NewMachineConfig(
 		container.NewV1Alpha1(
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineNetwork: &v1alpha1.NetworkConfig{
-						NetworkDisableSearchDomain: pointer.To(true),
+					MachineNetwork: &v1alpha1.NetworkConfig{ //nolint:staticcheck // legacy config
+						NetworkDisableSearchDomain: new(true),
 					},
 				},
 			},
@@ -279,7 +284,28 @@ func (suite *EtcFileConfigSuite) TestNoSearchDomain() {
 		etcFileContents{
 			hosts:            "127.0.0.1   localhost\n33.11.22.44 foo.example.com foo\n::1         localhost ip6-localhost ip6-loopback\nff02::1     ip6-allnodes\nff02::2     ip6-allrouters\n",
 			resolvConf:       "nameserver 127.0.0.53\n",
-			resolvGlobalConf: "nameserver 169.254.116.108\n",
+			resolvGlobalConf: "nameserver 169.254.116.108\nnameserver fd54:616c:6f73:0:204f:5320:444e:531\n",
+		},
+	)
+}
+
+func (suite *EtcFileConfigSuite) TestNoSearchDomainNewStyle() {
+	hc := networkcfg.NewResolverConfigV1Alpha1()
+	hc.ResolverSearchDomains = networkcfg.SearchDomainsConfig{
+		SearchDisableDefault: new(true),
+	}
+
+	ctr, err := container.New(hc)
+	suite.Require().NoError(err)
+
+	cfg := config.NewMachineConfig(ctr)
+
+	suite.testFiles(
+		[]resource.Resource{cfg, suite.defaultAddress, suite.hostnameStatus, suite.resolverStatus, suite.hostDNSConfig},
+		etcFileContents{
+			hosts:            "127.0.0.1   localhost\n33.11.22.44 foo.example.com foo\n::1         localhost ip6-localhost ip6-loopback\nff02::1     ip6-allnodes\nff02::2     ip6-allrouters\n",
+			resolvConf:       "nameserver 127.0.0.53\n",
+			resolvGlobalConf: "nameserver 169.254.116.108\nnameserver fd54:616c:6f73:0:204f:5320:444e:531\n",
 		},
 	)
 }
@@ -292,7 +318,7 @@ func (suite *EtcFileConfigSuite) TestNoDomainname() {
 		etcFileContents{
 			hosts:            "127.0.0.1   localhost\n33.11.22.44 foo\n::1         localhost ip6-localhost ip6-loopback\nff02::1     ip6-allnodes\nff02::2     ip6-allrouters\n",
 			resolvConf:       "nameserver 127.0.0.53\n",
-			resolvGlobalConf: "nameserver 169.254.116.108\n",
+			resolvGlobalConf: "nameserver 169.254.116.108\nnameserver fd54:616c:6f73:0:204f:5320:444e:531\n",
 		},
 	)
 }
@@ -301,9 +327,20 @@ func (suite *EtcFileConfigSuite) TestOnlyResolvers() {
 	suite.testFiles(
 		[]resource.Resource{suite.resolverStatus, suite.hostDNSConfig},
 		etcFileContents{
-			hosts:            "",
+			hosts:            "127.0.0.1 localhost\n::1       localhost ip6-localhost ip6-loopback\nff02::1   ip6-allnodes\nff02::2   ip6-allrouters\n",
 			resolvConf:       "nameserver 127.0.0.53\n",
-			resolvGlobalConf: "nameserver 169.254.116.108\n",
+			resolvGlobalConf: "nameserver 169.254.116.108\nnameserver fd54:616c:6f73:0:204f:5320:444e:531\n",
+		},
+	)
+}
+
+func (suite *EtcFileConfigSuite) TestNoHostDNS() {
+	suite.testFiles(
+		[]resource.Resource{suite.resolverStatus, suite.hostDNSConfigDisabled},
+		etcFileContents{
+			hosts:            "127.0.0.1 localhost\n::1       localhost ip6-localhost ip6-loopback\nff02::1   ip6-allnodes\nff02::2   ip6-allrouters\n",
+			resolvConf:       "nameserver 1.1.1.1\nnameserver 2.2.2.2\nnameserver 4.4.4.4\n",
+			resolvGlobalConf: "nameserver 1.1.1.1\nnameserver 2.2.2.2\nnameserver 4.4.4.4\n",
 		},
 	)
 }
@@ -319,20 +356,14 @@ func (suite *EtcFileConfigSuite) TestOnlyHostname() {
 	)
 }
 
-func (suite *EtcFileConfigSuite) TearDownTest() {
-	suite.T().Log("tear down")
-
-	suite.ctxCancel()
-
+func (suite *EtcFileConfigSuite) ExtraTearDown() {
 	if _, err := os.Lstat(suite.podResolvConfPath); err == nil {
 		if suite.etcRoot.FSType() == "os" {
 			suite.Require().NoError(os.Remove(suite.podResolvConfPath))
 		} else {
-			suite.Require().NoError(mount.SafeUnmount(context.Background(), nil, suite.podResolvConfPath))
+			suite.Require().NoError(mount.SafeUnmount(context.Background(), nil, suite.podResolvConfPath, false, false))
 		}
 	}
-
-	suite.wg.Wait()
 
 	if suite.etcRoot != nil {
 		suite.Require().NoError(os.RemoveAll(suite.bindMountTarget))
@@ -342,9 +373,25 @@ func (suite *EtcFileConfigSuite) TearDownTest() {
 }
 
 func TestEtcFileConfigSuite(t *testing.T) {
+	t.Parallel()
+
 	if os.Geteuid() != 0 {
 		t.Skip("skipping test that requires root privileges")
 	}
 
-	suite.Run(t, new(EtcFileConfigSuite))
+	s := &EtcFileConfigSuite{
+		DefaultSuite: ctest.DefaultSuite{
+			Timeout: 10 * time.Second,
+		},
+	}
+
+	s.AfterSetup = func(*ctest.DefaultSuite) {
+		s.ExtraSetup()
+	}
+
+	s.AfterTearDown = func(*ctest.DefaultSuite) {
+		s.ExtraTearDown()
+	}
+
+	suite.Run(t, s)
 }

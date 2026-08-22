@@ -9,7 +9,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,10 +22,14 @@ import (
 	"github.com/siderolabs/talos/internal/integration/base"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	"github.com/siderolabs/talos/pkg/machinery/client"
+	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
+	cfg "github.com/siderolabs/talos/pkg/machinery/config"
+	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
+	"github.com/siderolabs/talos/pkg/machinery/role"
 )
 
 // ApidSuite verifies Discovery API.
@@ -67,7 +73,8 @@ func (suite *ApidSuite) TestControlPlaneRouting() {
 
 	for _, endpoint := range endpoints {
 		suite.Run(endpoint, func() {
-			cli, err := client.New(suite.ctx,
+			cli, err := client.New(
+				suite.ctx,
 				client.WithConfig(suite.Talosconfig),
 				client.WithEndpoints(endpoint),
 			)
@@ -76,13 +83,13 @@ func (suite *ApidSuite) TestControlPlaneRouting() {
 			defer cli.Close() //nolint:errcheck
 
 			// try with multiple nodes
-			resp, err := cli.Version(client.WithNodes(suite.ctx, nodes...))
+			resp, err := cli.Version(client.WithNodes(suite.ctx, nodes...)) //nolint:staticcheck // testing deprecated method for backward compatibility
 			suite.Require().NoError(err)
 			suite.Assert().Len(resp.Messages, len(nodes))
 
 			// try with 'nodes' but a single node at a time
 			for _, node := range nodes {
-				resp, err = cli.Version(client.WithNodes(suite.ctx, node))
+				resp, err = cli.Version(client.WithNodes(suite.ctx, node)) //nolint:staticcheck // testing deprecated method for backward compatibility
 				suite.Require().NoError(err)
 				suite.Assert().Len(resp.Messages, 1)
 			}
@@ -126,7 +133,8 @@ func (suite *ApidSuite) TestWorkerNoRouting() {
 
 	for _, endpoint := range endpoints {
 		suite.Run(endpoint, func() {
-			cli, err := client.New(suite.ctx,
+			cli, err := client.New(
+				suite.ctx,
 				client.WithConfig(suite.Talosconfig),
 				client.WithEndpoints(endpoint),
 			)
@@ -142,7 +150,7 @@ func (suite *ApidSuite) TestWorkerNoRouting() {
 				}
 
 				// 'nodes'
-				_, err = cli.Version(client.WithNodes(suite.ctx, node))
+				_, err = cli.Version(client.WithNodes(suite.ctx, node)) //nolint:staticcheck // testing deprecated method for backward compatibility
 				suite.Require().Error(err)
 				suite.Assert().Equal(codes.PermissionDenied, client.StatusCode(err))
 
@@ -153,7 +161,7 @@ func (suite *ApidSuite) TestWorkerNoRouting() {
 			}
 
 			// try with 'nodes' but a single node (node itself)
-			resp, err := cli.Version(client.WithNodes(suite.ctx, endpoint))
+			resp, err := cli.Version(client.WithNodes(suite.ctx, endpoint)) //nolint:staticcheck // testing deprecated method for backward compatibility
 			suite.Require().NoError(err)
 			suite.Assert().Len(resp.Messages, 1)
 
@@ -191,7 +199,8 @@ func (suite *ApidSuite) TestBigPayload() {
 	// the config is encoded twice in the resource gRPC message, so ensure that we can get to the one third of the size
 	const targetConfigSize = constants.GRPCMaxMessageSize / 3
 
-	suite.T().Logf("original config size: %d (%s), target size is %d (%s)",
+	suite.T().Logf(
+		"original config size: %d (%s), target size is %d (%s)",
 		len(originalCfg), humanize.Bytes(uint64(len(originalCfg))), targetConfigSize, humanize.Bytes(uint64(targetConfigSize)),
 	)
 
@@ -230,6 +239,37 @@ func (suite *ApidSuite) TestBigPayload() {
 		Mode: machineapi.ApplyConfigurationRequest_NO_REBOOT,
 	})
 	suite.Require().NoError(err)
+}
+
+// TestPKIMismatch verifies that PKI mismatch is handled correctly.
+func (suite *ApidSuite) TestPKIMismatch() {
+	bundle, err := secrets.NewBundle(secrets.NewClock(), cfg.TalosVersionCurrent)
+	suite.Require().NoError(err)
+
+	cert, err := bundle.GenerateTalosAPIClientCertificate(role.MakeSet(role.Admin))
+	suite.Require().NoError(err)
+
+	suite.Require().Contains(suite.Talosconfig.Contexts, suite.Talosconfig.Context)
+
+	caCrt, err := base64.StdEncoding.DecodeString(suite.Talosconfig.Contexts[suite.Talosconfig.Context].CA)
+	suite.Require().NoError(err)
+
+	wrongConfig := clientconfig.NewConfig("wrong", suite.Talosconfig.Contexts[suite.Talosconfig.Context].Endpoints, caCrt, cert)
+
+	wrongClient, err := client.New(suite.ctx, client.WithConfig(wrongConfig))
+	suite.Require().NoError(err)
+
+	_, err = wrongClient.Version(suite.ctx)
+	suite.Require().Error(err)
+	suite.Assert().Equal(codes.Unavailable, client.StatusCode(err))
+	suite.Assert().True(
+		strings.Contains(err.Error(), "remote error: tls: unknown certificate authority") ||
+			strings.Contains(err.Error(), "write: broken pipe") ||
+			strings.Contains(err.Error(), "write: connection reset by peer"),
+		"unexpected error: %v", err,
+	)
+
+	suite.Require().NoError(wrongClient.Close())
 }
 
 func init() {

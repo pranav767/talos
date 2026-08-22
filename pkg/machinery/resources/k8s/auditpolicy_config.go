@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-// Package k8s provides resources which interface with Kubernetes.
+//nolint:dupl
 package k8s
 
 import (
@@ -34,7 +34,8 @@ type AuditPolicyConfigSpec struct {
 func NewAuditPolicyConfig() *AuditPolicyConfig {
 	return typed.NewResource[AuditPolicyConfigSpec, AuditPolicyConfigExtension](
 		resource.NewMetadata(ControlPlaneNamespaceName, AuditPolicyConfigType, AuditPolicyConfigID, resource.VersionUndefined),
-		AuditPolicyConfigSpec{})
+		AuditPolicyConfigSpec{},
+	)
 }
 
 // AuditPolicyConfigExtension defines AuditPolicyConfig resource definition.

@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go4.org/netipx"
@@ -106,7 +105,7 @@ func TestNfTablesRuleCompile(t *testing.T) { //nolint:tparallel
 					InterfaceNames: []string{"eth0"},
 					Operator:       nethelpers.OperatorNotEqual,
 				},
-				Verdict: pointer.To(nethelpers.VerdictAccept),
+				Verdict: new(nethelpers.VerdictAccept),
 			},
 			expectedRules: [][]expr.Any{
 				{
@@ -164,7 +163,7 @@ func TestNfTablesRuleCompile(t *testing.T) { //nolint:tparallel
 			name: "match on empty source address",
 			spec: networkres.NfTablesRule{
 				MatchSourceAddress: &networkres.NfTablesAddressMatch{},
-				Verdict:            pointer.To(nethelpers.VerdictDrop),
+				Verdict:            new(nethelpers.VerdictDrop),
 			},
 		},
 		{
@@ -178,7 +177,7 @@ func TestNfTablesRuleCompile(t *testing.T) { //nolint:tparallel
 						netip.MustParsePrefix("192.168.4.0/24"),
 					},
 				},
-				Verdict: pointer.To(nethelpers.VerdictDrop),
+				Verdict: new(nethelpers.VerdictDrop),
 			},
 			expectedRules: [][]expr.Any{
 				{
@@ -224,7 +223,7 @@ func TestNfTablesRuleCompile(t *testing.T) { //nolint:tparallel
 					},
 					Invert: true,
 				},
-				Verdict: pointer.To(nethelpers.VerdictDrop),
+				Verdict: new(nethelpers.VerdictDrop),
 			},
 			expectedRules: [][]expr.Any{
 				{
@@ -290,7 +289,7 @@ func TestNfTablesRuleCompile(t *testing.T) { //nolint:tparallel
 						netip.MustParsePrefix("20fe::/16"),
 					},
 				},
-				Verdict: pointer.To(nethelpers.VerdictDrop),
+				Verdict: new(nethelpers.VerdictDrop),
 			},
 			expectedRules: [][]expr.Any{
 				{
@@ -331,7 +330,7 @@ func TestNfTablesRuleCompile(t *testing.T) { //nolint:tparallel
 					},
 					Invert: true,
 				},
-				Verdict: pointer.To(nethelpers.VerdictDrop),
+				Verdict: new(nethelpers.VerdictDrop),
 			},
 			expectedRules: [][]expr.Any{
 				{
@@ -811,6 +810,55 @@ func TestNftablesSet(t *testing.T) { //nolint:tparallel
 				{Key: []uint8{0x1, 0xbc}, IntervalEnd: true},
 				{Key: []uint8{0x13, 0x88}, IntervalEnd: false}, // 5000-5001
 				{Key: []uint8{0x13, 0x8a}, IntervalEnd: true},
+			},
+		},
+		{
+			name: "ports with overflow",
+
+			set: network.NfTablesSet{
+				Kind: network.SetKindPort,
+				Ports: [][2]uint16{
+					{65530, 65535},
+				},
+			},
+
+			expectedKeyType:  nftables.TypeInetService,
+			expectedInterval: true,
+			expectedData: []nftables.SetElement{ // network byte order
+				{Key: []uint8{0xff, 0xfa}, IntervalEnd: false}, // 65530-inf
+			},
+		},
+		{
+			name: "regular ip range",
+
+			set: network.NfTablesSet{
+				Kind: network.SetKindIPv4,
+				Addresses: []netipx.IPRange{
+					netipx.MustParseIPRange("10.0.0.0-10.0.0.255"),
+				},
+			},
+
+			expectedKeyType:  nftables.TypeIPAddr,
+			expectedInterval: true,
+			expectedData: []nftables.SetElement{ // network byte order
+				{Key: []uint8{10, 0, 0, 0}, IntervalEnd: false},
+				{Key: []uint8{10, 0, 1, 0}, IntervalEnd: true},
+			},
+		},
+		{
+			name: "ip range with overflow",
+
+			set: network.NfTablesSet{
+				Kind: network.SetKindIPv4,
+				Addresses: []netipx.IPRange{
+					netipx.MustParseIPRange("10.0.0.0-255.255.255.255"),
+				},
+			},
+
+			expectedKeyType:  nftables.TypeIPAddr,
+			expectedInterval: true,
+			expectedData: []nftables.SetElement{ // network byte order
+				{Key: []uint8{10, 0, 0, 0}, IntervalEnd: false}, // 10.0.0.0-inf
 			},
 		},
 	} {

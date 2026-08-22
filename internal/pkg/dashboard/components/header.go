@@ -17,12 +17,15 @@ import (
 	"github.com/siderolabs/talos/internal/pkg/dashboard/apidata"
 	"github.com/siderolabs/talos/internal/pkg/dashboard/resourcedata"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
+	"github.com/siderolabs/talos/pkg/machinery/resources/runtime"
+	"github.com/siderolabs/talos/pkg/machinery/version"
 )
 
 const noHostname = "(no hostname)"
 
 type headerData struct {
 	hostname        string
+	name            string
 	version         string
 	uptime          string
 	cpuFreq         string
@@ -73,6 +76,18 @@ func (widget *Header) OnResourceDataChange(data resourcedata.Data) {
 		} else {
 			nodeData.hostname = res.TypedSpec().Hostname
 		}
+	case *runtime.Version:
+		if data.Deleted {
+			nodeData.name = version.Name
+			nodeData.version = notAvailable
+		} else {
+			nodeData.name = res.TypedSpec().Name
+			nodeData.version = res.TypedSpec().Version
+
+			if nodeData.name == "" {
+				nodeData.name = version.Name
+			}
+		}
 	}
 
 	if data.Node == widget.selectedNode {
@@ -111,6 +126,23 @@ func (widget *Header) humanizeCPUFrequency(mhz float64) string {
 	return fmt.Sprintf("%s%s", humanize.Ftoa(value), unit)
 }
 
+// formatUptime returns a duration in a human readable form.
+//
+// If d>24h returns format "23d72h3m5s", otherwise "72h3m5s".
+func formatUptime(d time.Duration) string {
+	const day = 24 * time.Hour
+
+	d = d.Round(time.Second)
+	if d >= day {
+		uptimeDays := d / day
+		uptimeRest := d % day
+
+		return fmt.Sprintf("%dd%s", uptimeDays, uptimeRest)
+	}
+
+	return d.String()
+}
+
 // Spinner is a set of characters compatible with Linux virtual console CP437.
 var spinner = []string{"\u2510", "\u2518", "\u2514", "\u250C"}
 
@@ -119,9 +151,10 @@ func (widget *Header) redraw() {
 	spinnerPos := widget.spinnerPos % len(spinner)
 
 	text := fmt.Sprintf(
-		"[green]%s [yellow::b]%s[-:-:-] (%s): uptime %s, %s, %s RAM, PROCS %s, CPU %s, RAM %s",
+		"[green]%s [yellow::b]%s[-:-:-] %s (%s): uptime %s, %s, %s RAM, PROCS %s, CPU %s, RAM %s",
 		spinner[spinnerPos],
 		data.hostname,
+		data.name,
 		data.version,
 		data.uptime,
 		data.cpuFreq,
@@ -145,14 +178,9 @@ func (widget *Header) updateNodeAPIData(node string, data *apidata.Node) {
 	nodeData.cpuUsagePercent = fmt.Sprintf("%.1f%%", data.CPUUsageByName("usage")*100.0)
 	nodeData.memUsagePercent = fmt.Sprintf("%.1f%%", data.MemUsage()*100.0)
 
-	if data.Version != nil {
-		nodeData.version = data.Version.GetVersion().GetTag()
-	} else {
-		nodeData.version = notAvailable
-	}
-
 	if data.SystemStat != nil && data.SystemStat.BootTime != 0 {
-		nodeData.uptime = time.Since(time.Unix(int64(data.SystemStat.GetBootTime()), 0)).Round(time.Second).String()
+		uptime := time.Since(time.Unix(int64(data.SystemStat.GetBootTime()), 0))
+		nodeData.uptime = formatUptime(uptime)
 	} else {
 		nodeData.uptime = notAvailable
 	}
@@ -220,6 +248,7 @@ func (widget *Header) getOrCreateNodeData(node string) *headerData {
 	if !ok {
 		data = &headerData{
 			hostname:        notAvailable,
+			name:            version.Name,
 			version:         notAvailable,
 			uptime:          notAvailable,
 			cpuFreq:         notAvailable,

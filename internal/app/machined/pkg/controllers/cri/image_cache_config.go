@@ -23,6 +23,7 @@ import (
 	"github.com/siderolabs/gen/optional"
 	"go.uber.org/zap"
 
+	blockadapter "github.com/siderolabs/talos/internal/app/machined/pkg/adapters/block"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/system"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/system/services"
 	"github.com/siderolabs/talos/internal/pkg/partition"
@@ -41,6 +42,7 @@ type ServiceManager interface {
 	IsRunning(id string) (system.Service, bool, error)
 	Load(services ...system.Service) []string
 	Start(serviceIDs ...string) error
+	Stop(ctx context.Context, serviceIDs ...string) error
 }
 
 // ImageCacheConfigController manages configures Image Cache.
@@ -110,7 +112,7 @@ func (ctrl *ImageCacheConfigController) Outputs() []controller.Output {
 
 // Volume configuration constants.
 const (
-	VolumeImageCacheISO  = "IMAGECACHE-ISO"
+	VolumeImageCacheISO  = constants.ImageCacheISOLabel
 	VolumeImageCacheDISK = constants.ImageCachePartitionLabel
 
 	MinImageCacheSize = 500 * 1024 * 1024      // 500MB
@@ -141,7 +143,7 @@ func (ctrl *ImageCacheConfigController) Run(ctx context.Context, r controller.Ru
 		}
 
 		// image cache is disabled
-		imageCacheDisabled := cfg == nil || cfg.Config().Machine() == nil || !cfg.Config().Machine().Features().ImageCache().LocalEnabled()
+		imageCacheDisabled := cfg == nil || cfg.Config().ImageCacheConfig() == nil || !cfg.Config().ImageCacheConfig().LocalEnabled()
 
 		var (
 			status     cri.ImageCacheStatus
@@ -197,6 +199,56 @@ func (ctrl *ImageCacheConfigController) Run(ctx context.Context, r controller.Ru
 			}
 		}
 
+		// do some cleanup on disabled status
+		if status == cri.ImageCacheStatusDisabled {
+			if registryDService != nil {
+				_, running, err := ctrl.V1Alpha1ServiceManager.IsRunning(RegistrydServiceID)
+
+				if err == nil && running {
+					if err = ctrl.V1Alpha1ServiceManager.Stop(ctx, RegistrydServiceID); err != nil {
+						return fmt.Errorf("error stopping service: %w", err)
+					}
+				}
+			} else if imageCacheDisabled {
+				// if the service is not running, remove the volume mount requests
+				vmrs, err := safe.ReaderListAll[*block.VolumeMountRequest](ctx, r)
+				if err != nil {
+					return fmt.Errorf("error listing volume mount requests: %w", err)
+				}
+
+				for vmr := range vmrs.All() {
+					if vmr.Metadata().Owner() != ctrl.Name() {
+						continue
+					}
+
+					ready, err := r.Teardown(ctx, vmr.Metadata())
+					if err != nil {
+						return fmt.Errorf("error tearing down volume mount request: %w", err)
+					}
+
+					if ready {
+						if err = r.Destroy(ctx, vmr.Metadata()); err != nil {
+							return fmt.Errorf("error destroying volume mount request: %w", err)
+						}
+					}
+				}
+
+				// also remove our finalizers on VolumeMountStatuses
+				vmss, err := safe.ReaderListAll[*block.VolumeMountStatus](ctx, r)
+				if err != nil {
+					return fmt.Errorf("error listing volume mount status: %w", err)
+				}
+
+				for vms := range vmss.All() {
+					if vms.Metadata().Finalizers().Has(ctrl.Name()) {
+						if err = r.RemoveFinalizer(ctx, vms.Metadata(), ctrl.Name()); err != nil {
+							return fmt.Errorf("error removing finalizer: %w", err)
+						}
+					}
+				}
+			}
+		}
+
 		logger.Debug("image cache status", zap.String("status", status.String()), zap.String("copy_status", copyStatus.String()))
 
 		if err = safe.WriterModify(ctx, r, cri.NewImageCacheConfig(), func(cfg *cri.ImageCacheConfig) error {
@@ -208,6 +260,8 @@ func (ctrl *ImageCacheConfigController) Run(ctx context.Context, r controller.Ru
 		}); err != nil {
 			return fmt.Errorf("error writing ImageCacheConfig: %w", err)
 		}
+
+		r.ResetRestartBackoff()
 	}
 }
 
@@ -313,6 +367,10 @@ func (ctrl *ImageCacheConfigController) createVolumeConfigDisk(ctx context.Conte
 			volumeCfg.TypedSpec().Provisioning.PartitionSpec.Label = constants.ImageCachePartitionLabel
 			volumeCfg.TypedSpec().Provisioning.PartitionSpec.TypeUUID = partition.LinuxFilesystemData
 			volumeCfg.TypedSpec().Provisioning.FilesystemSpec.Type = block.FilesystemTypeEXT4
+
+			if err := blockadapter.VolumeConfigSpec(volumeCfg.TypedSpec()).ApplyEncryptionConfig(extraCfg.Encryption()); err != nil {
+				return fmt.Errorf("error applying encryption config: %w", err)
+			}
 		}
 
 		volumeCfg.TypedSpec().Mount = block.MountSpec{
@@ -374,11 +432,15 @@ func (ctrl *ImageCacheConfigController) analyzeImageCacheVolumes(ctx context.Con
 		// but we want them to be mounted whenever they are ready
 		mountID := ctrl.Name() + "-" + volumeID
 
-		if err := safe.WriterModify(ctx, r, block.NewVolumeMountRequest(block.NamespaceName, mountID),
+		if err := safe.WriterModify(
+			ctx, r, block.NewVolumeMountRequest(block.NamespaceName, mountID),
 			func(mountRequest *block.VolumeMountRequest) error {
 				mountRequest.TypedSpec().Requester = ctrl.Name()
 				mountRequest.TypedSpec().VolumeID = volumeID
 				mountRequest.TypedSpec().ReadOnly = !(volumeStatus.Metadata().ID() == VolumeImageCacheDISK && isoPresent)
+				// Image cache stores OCI image data only.
+				mountRequest.TypedSpec().Secure = true
+				mountRequest.TypedSpec().NoExec = true
 
 				return nil
 			},

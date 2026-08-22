@@ -30,6 +30,8 @@ type TalosSuite struct {
 	K8sEndpoint string
 	// Cluster describes provisioned cluster, used for discovery purposes
 	Cluster provision.Cluster
+	// HTTPProbeProvisioner probes through the external provisioner/fabric network namespace.
+	HTTPProbeProvisioner provision.HTTPProbeProvisioner
 	// TalosConfig is a path to talosconfig
 	TalosConfig string
 	// Version is the (expected) version of Talos tests are running against
@@ -48,6 +50,13 @@ type TalosSuite struct {
 	ExtensionsQEMU bool
 	// ExtensionsNvidia runs tests with nvidia extensions enabled
 	ExtensionsNvidia bool
+	// BGPEnabled runs tests against a cluster created with an embedded BGP fabric peer (--with-bgp)
+	BGPEnabled bool
+	// BGPCLOSEnabled runs the full-CLOS BGP test against a cluster created with --with-bgp-clos (each
+	// node peers unnumbered with a host fabric peer over dedicated uplinks)
+	BGPCLOSEnabled bool
+	// CiliumBGPEnabled runs the Cilium-to-fabric BGP integration test against a Cilium CNI cluster.
+	CiliumBGPEnabled bool
 	// TrustedBoot tells if the cluster is secure booted and disks are encrypted
 	TrustedBoot bool
 	// SelinuxEnforcing tells if the cluster is booted with the image with selinux enforcement enabled
@@ -66,6 +75,14 @@ type TalosSuite struct {
 	Virtiofsd bool
 	// Race informs test suites about race detector being enabled (e.g. for skipping incompatible tests)
 	Race bool
+	// DedicatedSystemVolumes tells that the cluster was created with the promotable system volumes
+	// placed on dedicated partitions instead of directories under EPHEMERAL, i.e. with the
+	// `hack/test/patches/dedicated-system-volumes-{controlplane,worker}.yaml` config patches applied.
+	DedicatedSystemVolumes bool
+	// EphemeralNode marks the cluster as fully ephemeral (STATE + EPHEMERAL backed by tmpfs).
+	// Tests sensitive to persistent state should skip when this is true; the dedicated
+	// ephemeral test suite uses this to gate its assertions.
+	EphemeralNode bool
 
 	discoveredNodes cluster.Info
 }

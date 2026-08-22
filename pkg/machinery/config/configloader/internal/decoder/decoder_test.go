@@ -18,6 +18,8 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/config/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/configloader/internal/decoder"
 	"github.com/siderolabs/talos/pkg/machinery/config/internal/registry"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/k8s"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/meta"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 )
 
@@ -77,7 +79,7 @@ func (m *KubeletConfig) Clone() config.Document {
 type MockUnstructured struct {
 	Meta
 
-	Pods []v1alpha1.Unstructured `yaml:"pods,omitempty"`
+	Pods []meta.Unstructured `yaml:"pods,omitempty"`
 }
 
 func (m *MockUnstructured) Clone() config.Document {
@@ -129,13 +131,29 @@ test: true
 			expectedErr: "",
 		},
 		{
+			name: "empty docs",
+			source: []byte(`---
+kind: mock
+apiVersion: v1alpha1
+test: true
+---
+---
+`),
+			expected: []config.Document{
+				&Mock{
+					Test: true,
+				},
+			},
+			expectedErr: "",
+		},
+		{
 			name: "missing kind",
 			source: []byte(`---
 apiVersion: v1alpha2
 test: true
 `),
 			expected:    nil,
-			expectedErr: "missing kind",
+			expectedErr: "error decoding document v1alpha2/v1alpha1/ (line 2): missing kind",
 		},
 		{
 			name: "empty kind",
@@ -145,7 +163,7 @@ apiVersion: v1alpha2
 test: true
 `),
 			expected:    nil,
-			expectedErr: "missing kind",
+			expectedErr: "error decoding document v1alpha2/v1alpha1/ (line 2): missing kind",
 		},
 		{
 			name: "tab instead of spaces",
@@ -156,7 +174,7 @@ spec:
 	test: true
 `),
 			expected:    nil,
-			expectedErr: "decode error: yaml: line 5: found character that cannot start any token",
+			expectedErr: "decode error: go-yaml load error in scanner (while scanning for the next token) at L5.C1: found character that cannot start any token",
 		},
 		{
 			name: "extra field",
@@ -167,7 +185,7 @@ test: true
 extra: fail
 `),
 			expected:    nil,
-			expectedErr: "unknown keys found during decoding:\nextra: fail\n",
+			expectedErr: "error decoding document v1alpha1/mock/ (line 2): unknown keys found during decoding:\nextra: fail\n",
 		},
 		{
 			name: "extra fields in map",
@@ -180,7 +198,7 @@ map:
     extra: me
 `),
 			expected:    nil,
-			expectedErr: "unknown keys found during decoding:\nmap:\n    first:\n        extra: me\n",
+			expectedErr: "error decoding document v1alpha2/mock/ (line 2): unknown keys found during decoding:\nmap:\n    first:\n        extra: me\n",
 		},
 		{
 			name: "extra fields in slice",
@@ -194,7 +212,7 @@ slice:
     fields: here
 `),
 			expected:    nil,
-			expectedErr: "unknown keys found during decoding:\nslice:\n    - fields: here\n      more: extra\n      not: working\n",
+			expectedErr: "error decoding document v1alpha2/mock/ (line 2): unknown keys found during decoding:\nslice:\n    - fields: here\n      more: extra\n      not: working\n",
 		},
 		{
 			name: "extra zero fields in map",
@@ -207,7 +225,7 @@ map:
       b: {}
 `),
 			expected:    nil,
-			expectedErr: "unknown keys found during decoding:\nmap:\n    second:\n        a:\n            b: {}\n",
+			expectedErr: "error decoding document v1alpha2/mock/ (line 2): unknown keys found during decoding:\nmap:\n    second:\n        a:\n            b: {}\n",
 		},
 		{
 			name: "valid nested",
@@ -269,7 +287,7 @@ omit: false
 			name:        "internal error",
 			source:      []byte(":   \xea"),
 			expected:    nil,
-			expectedErr: "decode error: yaml: incomplete UTF-8 octet sequence",
+			expectedErr: "decode error: go-yaml load error in reader at <unknown position>: incomplete UTF-8 octet sequence",
 		},
 		{
 			name: "unstructured config",
@@ -286,6 +304,28 @@ pods:
 `),
 			expected:    nil,
 			expectedErr: "",
+		},
+		{
+			name: "kube apiserver extra args list value",
+			source: []byte(`---
+apiVersion: v1alpha1
+kind: KubeAPIServerConfig
+extraArgs:
+  service-account-issuer:
+    - https://OLD-ENDPOINT:6443
+    - https://NEW-ENDPOINT:6443
+`),
+			expected: []config.Document{
+				&k8s.KubeAPIServerConfigV1Alpha1{
+					Meta: meta.Meta{
+						MetaAPIVersion: "v1alpha1",
+						MetaKind:       "KubeAPIServerConfig",
+					},
+					PodArgs: meta.Args{
+						"service-account-issuer": meta.NewArgValue("", []string{"https://OLD-ENDPOINT:6443", "https://NEW-ENDPOINT:6443"}),
+					},
+				},
+			},
 		},
 		{
 			name: "omit empty test",
@@ -306,7 +346,15 @@ config:
           - content: MONITOR ${upsmonHost} 1 remote pass foo
             mountPath: /usr/local/etc/nut/upsmon.conf
 `),
-			expectedErr: "\"ExtensionServiceConfig\" \"\": not registered",
+			expectedErr: "error decoding document /ExtensionServiceConfig/ (line 2): missing apiVersion",
+		},
+		{
+			name: "missing apiVersion",
+			source: []byte(`---
+kind: mock
+test: true
+`),
+			expectedErr: "error decoding document /mock/ (line 2): missing apiVersion",
 		},
 	}
 
@@ -315,7 +363,7 @@ config:
 			t.Parallel()
 
 			d := decoder.NewDecoder()
-			actual, err := d.Decode(bytes.NewReader(tt.source), false)
+			actual, err := d.Decode(bytes.NewReader(tt.source), false, false)
 
 			if tt.expected != nil {
 				assert.Equal(t, tt.expected, actual)
@@ -344,7 +392,7 @@ func TestDecoderV1Alpha1Config(t *testing.T) {
 			require.NoError(t, err)
 
 			d := decoder.NewDecoder()
-			_, err = d.Decode(bytes.NewReader(contents), false)
+			_, err = d.Decode(bytes.NewReader(contents), false, false)
 
 			assert.NoError(t, err)
 		})
@@ -358,9 +406,13 @@ func TestDoubleV1Alpha1(t *testing.T) {
 	contents := must.Value(files.ReadFile("v1alpha1.yaml"))(t)
 
 	d := decoder.NewDecoder()
-	_, err := d.Decode(bytes.NewReader(contents), false)
+	_, err := d.Decode(bytes.NewReader(contents), false, false)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "not allowed")
+
+	// now try with the allow duplicates
+	_, err = d.Decode(bytes.NewReader(contents), false, true)
+	require.NoError(t, err)
 }
 
 func BenchmarkDecoderV1Alpha1Config(b *testing.B) {
@@ -371,7 +423,7 @@ func BenchmarkDecoderV1Alpha1Config(b *testing.B) {
 
 	for b.Loop() {
 		d := decoder.NewDecoder()
-		_, err = d.Decode(bytes.NewReader(contents), false)
+		_, err = d.Decode(bytes.NewReader(contents), false, false)
 
 		assert.NoError(b, err)
 	}

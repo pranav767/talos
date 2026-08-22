@@ -6,31 +6,27 @@ source ./hack/test/e2e.sh
 
 REGION="us-east-1"
 
+ARCH="${TARGET_ARCH:-amd64}"
+
 function cloud_image_upload() {
   RANDOM_SUFFIX=$(openssl rand -hex 4)
 
-  CLOUD_IMAGES_EXTRA_ARGS=("--name-prefix=${1}-${RANDOM_SUFFIX}" "--target-clouds=aws" "--architectures=amd64" "--aws-regions=${REGION}")
-
-  case "${1}" in
-    talos-e2e-nvidia-oss-*)
-      CLOUD_IMAGES_EXTRA_ARGS+=("--aws-force-bios")
-      ;;
-  esac
+  CLOUD_IMAGES_EXTRA_ARGS=("--name-prefix=${1}-${RANDOM_SUFFIX}" "--target-clouds=aws" "--architectures=${ARCH}" "--aws-regions=${REGION}")
 
   make cloud-images CLOUD_IMAGES_EXTRA_ARGS="${CLOUD_IMAGES_EXTRA_ARGS[*]}"
 }
 
 function get_ami_id() {
-  jq -r ".[] | select(.cloud == \"aws\") | select(.region == \"${REGION}\") | select (.arch == \"amd64\") | .id" "${ARTIFACTS}/cloud-images.json"
+  jq -r ".[] | select(.cloud == \"aws\") | select(.region == \"${REGION}\") | select (.arch == \"${ARCH}\") | .id" "${ARTIFACTS}/cloud-images.json"
 }
 
 function cloud_image_upload_with_extensions() {
   case "${1}" in
     nvidia-oss-lts)
-      EXTENSIONS=$(jq -R < "${EXTENSIONS_METADATA_FILE}" | jq -rs 'map(select(. | (contains("nvidia-open-gpu-kernel-modules-lts") or contains("nvidia-container-toolkit-lts") or contains("zfs")) and (contains("nvidia-fabricmanager") or contains("nonfree-kmod-nvidia") | not))) | .[] |= "--system-extension-image=" + . | join(" ")')
+      EXTENSIONS=$(jq -R < "${EXTENSIONS_METADATA_FILE}" | jq -rs 'map(select(. | (contains("nvidia-open-gpu-kernel-modules-lts") or contains("nvidia-container-toolkit-lts")) and (contains("nvidia-fabricmanager") or contains("nonfree-kmod-nvidia") | not))) | .[] |= "--system-extension-image=" + . | join(" ")')
       ;;
     nvidia-oss-production)
-      EXTENSIONS=$(jq -R < "${EXTENSIONS_METADATA_FILE}" | jq -rs 'map(select(. | (contains("nvidia-open-gpu-kernel-modules-production") or contains("nvidia-container-toolkit-production") or contains("zfs")) and (contains("nvidia-fabricmanager") or contains("nonfree-kmod-nvidia") | not))) | .[] |= "--system-extension-image=" + . | join(" ")')
+      EXTENSIONS=$(jq -R < "${EXTENSIONS_METADATA_FILE}" | jq -rs 'map(select(. | (contains("nvidia-open-gpu-kernel-modules-production") or contains("nvidia-container-toolkit-production")) and (contains("nvidia-fabricmanager") or contains("nonfree-kmod-nvidia") | not))) | .[] |= "--system-extension-image=" + . | join(" ")')
       ;;
     nvidia-oss-fabricmanager)
       EXTENSIONS=$(jq -R < "${EXTENSIONS_METADATA_FILE}" | jq -rs 'map(select(. | (contains("nvidia-open-gpu-kernel-modules-production") or contains("nvidia-container-toolkit-production")) and (contains("nonfree-kmod-nvidia") | not))) | .[] |= "--system-extension-image=" + . | join(" ")')
@@ -48,7 +44,7 @@ function cloud_image_upload_with_extensions() {
       ;;
   esac
 
-  make image-aws IMAGER_ARGS="${EXTENSIONS}" PLATFORM=linux/amd64
+  make image-aws IMAGER_ARGS="${EXTENSIONS}" PLATFORM="linux/${ARCH}"
   cloud_image_upload "talos-e2e-${1}"
 }
 
@@ -73,7 +69,9 @@ esac
 
 mkdir -p "${ARTIFACTS}/e2e-aws-generated"
 
-NAME_PREFIX="${SHA}-${E2E_AWS_TARGET}"
+NAME_PREFIX="${SHA}-${E2E_AWS_TARGET}-${ARCH}"
+
+AWS_JQ_TEMPLATE="aws-${ARCH}.jq"
 
 jq --null-input \
   --arg WORKER_GROUP "${WORKER_GROUP}" \
@@ -90,6 +88,6 @@ jq --null-input \
         talos_version_contract: $TALOS_VERSION_CONTRACT,
         kubernetes_version: $KUBERNETES_VERSION
     }' \
-  | jq -f hack/test/tfvars/aws.jq > "${ARTIFACTS}/e2e-aws-generated/vars.json"
+  | jq -f "hack/test/tfvars/${AWS_JQ_TEMPLATE}" > "${ARTIFACTS}/e2e-aws-generated/vars.json"
 
 cp hack/test/tfvars/*.yaml "${ARTIFACTS}/e2e-aws-generated"

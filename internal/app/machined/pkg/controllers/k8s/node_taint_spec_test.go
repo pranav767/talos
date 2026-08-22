@@ -12,10 +12,9 @@ import (
 	"github.com/cosi-project/runtime/pkg/safe"
 	"github.com/cosi-project/runtime/pkg/state"
 	"github.com/siderolabs/gen/xslices"
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/ctest"
 	k8sctrl "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/k8s"
@@ -59,15 +58,15 @@ func (suite *NodeTaintsSuite) updateMachineConfig(machineType machine.Type, allo
 				MachineNodeTaints: nodeTaints,
 			},
 			ClusterConfig: &v1alpha1.ClusterConfig{
-				AllowSchedulingOnControlPlanes: pointer.To(allowScheduling),
+				AllowSchedulingOnControlPlanes: new(allowScheduling),
 			},
 		}))
 
 		suite.Require().NoError(suite.State().Create(suite.Ctx(), cfg))
 	} else {
-		cfg.Container().RawV1Alpha1().ClusterConfig.AllowSchedulingOnControlPlanes = pointer.To(allowScheduling)
+		cfg.Container().RawV1Alpha1().ClusterConfig.AllowSchedulingOnControlPlanes = new(allowScheduling) //nolint:staticcheck
 		cfg.Container().RawV1Alpha1().MachineConfig.MachineType = machineType.String()
-		cfg.Container().RawV1Alpha1().MachineConfig.MachineNodeTaints = nodeTaints
+		cfg.Container().RawV1Alpha1().MachineConfig.MachineNodeTaints = nodeTaints //nolint:staticcheck
 		suite.Require().NoError(suite.State().Update(suite.Ctx(), cfg))
 	}
 }
@@ -82,9 +81,9 @@ func (suite *NodeTaintsSuite) TestControlplane() {
 	suite.updateMachineConfig(machine.TypeControlPlane, false)
 
 	rtestutils.AssertResources(suite.Ctx(), suite.T(), suite.State(), []string{constants.LabelNodeRoleControlPlane},
-		func(labelSpec *k8s.NodeTaintSpec, asrt *assert.Assertions) {
-			asrt.Empty(labelSpec.TypedSpec().Value)
-			asrt.Equal(string(v1.TaintEffectNoSchedule), labelSpec.TypedSpec().Effect)
+		func(taintSpec *k8s.NodeTaintSpec, asrt *assert.Assertions) {
+			asrt.Empty(taintSpec.TypedSpec().Value)
+			asrt.Equal(string(corev1.TaintEffectNoSchedule), taintSpec.TypedSpec().Effect)
 		})
 
 	suite.updateMachineConfig(machine.TypeControlPlane, true)
@@ -104,7 +103,7 @@ func (suite *NodeTaintsSuite) TestCustomTaints() {
 		func(labelSpec *k8s.NodeTaintSpec, asrt *assert.Assertions) {
 			asrt.Equal(customTaintKey, labelSpec.TypedSpec().Key)
 			asrt.Equal("value1", labelSpec.TypedSpec().Value)
-			asrt.Equal(string(v1.TaintEffectNoSchedule), labelSpec.TypedSpec().Effect)
+			asrt.Equal(string(corev1.TaintEffectNoSchedule), labelSpec.TypedSpec().Effect)
 		})
 
 	suite.updateMachineConfig(machine.TypeControlPlane, false)

@@ -69,6 +69,11 @@ func (ctrl *LocalAffiliateController) Inputs() []controller.Input {
 			Kind:      controller.InputWeak,
 		},
 		{
+			Namespace: k8s.NamespaceName,
+			Type:      k8s.NodeStatusType,
+			Kind:      controller.InputWeak,
+		},
+		{
 			Namespace: kubespan.NamespaceName,
 			Type:      kubespan.IdentityType,
 			ID:        optional.Some(kubespan.LocalIdentity),
@@ -94,7 +99,7 @@ func (ctrl *LocalAffiliateController) Inputs() []controller.Input {
 		{
 			Namespace: k8s.ControlPlaneNamespaceName,
 			Type:      k8s.APIServerConfigType,
-			ID:        optional.Some(k8s.APIServerConfigID),
+			ID:        optional.Some(k8s.FinalAPIServerConfigID),
 			Kind:      controller.InputWeak,
 		},
 	}
@@ -196,9 +201,9 @@ func (ctrl *LocalAffiliateController) Run(ctx context.Context, r controller.Runt
 			return fmt.Errorf("error getting kubespan config: %w", err)
 		}
 
-		ksAdditionalAddresses, err := safe.ReaderGetByID[*network.NodeAddress](ctx, r, network.FilteredNodeAddressID(network.NodeAddressCurrentID, k8s.NodeAddressFilterOnlyK8s))
+		nodeStatus, err := safe.ReaderGetByID[*k8s.NodeStatus](ctx, r, nodename.TypedSpec().Nodename)
 		if err != nil && !state.IsNotFoundError(err) {
-			return fmt.Errorf("error getting kubespan additional addresses: %w", err)
+			return fmt.Errorf("error getting node status: %w", err)
 		}
 
 		discoveredPublicIPs, err := safe.ReaderList[*network.AddressStatus](ctx, r, resource.NewMetadata(cluster.NamespaceName, network.AddressStatusType, "", resource.VersionUndefined))
@@ -207,7 +212,7 @@ func (ctrl *LocalAffiliateController) Run(ctx context.Context, r controller.Runt
 		}
 
 		// optional resources (kubernetes)
-		apiServerConfig, err := safe.ReaderGetByID[*k8s.APIServerConfig](ctx, r, k8s.APIServerConfigID)
+		apiServerConfig, err := safe.ReaderGetByID[*k8s.APIServerConfig](ctx, r, k8s.FinalAPIServerConfigID)
 		if err != nil && !state.IsNotFoundError(err) {
 			return fmt.Errorf("error getting API server config: %w", err)
 		}
@@ -216,7 +221,9 @@ func (ctrl *LocalAffiliateController) Run(ctx context.Context, r controller.Runt
 
 		touchedIDs := map[resource.ID]struct{}{}
 
-		if discoveryConfig.TypedSpec().DiscoveryEnabled {
+		discoverySpec := discoveryConfig.TypedSpec()
+
+		if discoverySpec.RegistryKubernetesEnabled || len(discoverySpec.ServiceEndpoints) > 0 {
 			if err = safe.WriterModify(ctx, r, cluster.NewAffiliate(cluster.NamespaceName, localID), func(res *cluster.Affiliate) error {
 				spec := res.TypedSpec()
 
@@ -245,11 +252,13 @@ func (ctrl *LocalAffiliateController) Run(ctx context.Context, r controller.Runt
 					spec.KubeSpan.Address = kubespanIdentity.TypedSpec().Address.Addr()
 					spec.KubeSpan.PublicKey = kubespanIdentity.TypedSpec().PublicKey
 
-					if kubespanConfig.TypedSpec().AdvertiseKubernetesNetworks && ksAdditionalAddresses != nil {
-						spec.KubeSpan.AdditionalAddresses = slices.Clone(ksAdditionalAddresses.TypedSpec().Addresses)
+					if kubespanConfig.TypedSpec().AdvertiseKubernetesNetworks && nodeStatus != nil {
+						spec.KubeSpan.AdditionalAddresses = slices.Clone(nodeStatus.TypedSpec().PodCIDRs)
 					} else {
 						spec.KubeSpan.AdditionalAddresses = nil
 					}
+
+					spec.KubeSpan.ExcludeAdvertisedNetworks = kubespanConfig.TypedSpec().ExcludeAdvertisedNetworks
 
 					endpointIPs := xslices.Filter(currentNodeIPs, func(ip netip.Addr) bool {
 						if ip == spec.KubeSpan.Address {

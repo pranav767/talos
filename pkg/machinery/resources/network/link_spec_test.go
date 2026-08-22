@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v4"
@@ -20,6 +19,8 @@ import (
 )
 
 func TestLinkSpecMarshalYAML(t *testing.T) {
+	t.Parallel()
+
 	spec := network.LinkSpecSpec{
 		Name:       "eth0",
 		Logical:    true,
@@ -32,6 +33,9 @@ func TestLinkSpecMarshalYAML(t *testing.T) {
 			MasterName: "bond0",
 			SlaveIndex: 0,
 		},
+		VRFSlave: network.VRFSlave{
+			MasterName: "vrf-blue",
+		},
 		VLAN: network.VLANSpec{
 			VID:      25,
 			Protocol: nethelpers.VLANProtocol8021AD,
@@ -42,7 +46,7 @@ func TestLinkSpecMarshalYAML(t *testing.T) {
 			LACPRate:        nethelpers.LACPRateFast,
 			ARPValidate:     nethelpers.ARPValidateAll,
 			ARPAllTargets:   nethelpers.ARPAllTargetsAny,
-			PrimaryIndex:    pointer.To[uint32](3),
+			PrimaryIndex:    new(uint32(3)),
 			PrimaryReselect: nethelpers.PrimaryReselectBetter,
 			FailOverMac:     nethelpers.FailOverMACFollow,
 			ADSelect:        nethelpers.ADSelectCount,
@@ -62,6 +66,9 @@ func TestLinkSpecMarshalYAML(t *testing.T) {
 			ADUserPortKey:   7,
 			PeerNotifyDelay: 40,
 		},
+		VRFMaster: network.VRFMasterSpec{
+			Table: 123,
+		},
 		Wireguard: network.WireguardSpec{
 			PrivateKey:   "foo=",
 			PublicKey:    "bar=",
@@ -79,6 +86,9 @@ func TestLinkSpecMarshalYAML(t *testing.T) {
 				},
 			},
 		},
+		Veth: network.VethSpec{
+			PeerName: "eth2",
+		},
 		ConfigLayer: network.ConfigPlatform,
 	}
 
@@ -94,6 +104,8 @@ kind: eth
 type: ether
 parentName: eth1
 masterName: bond0
+vrfSlave:
+    masterName: vrf-blue
 vlan:
     vlanID: 25
     vlanProtocol: 802.1ad
@@ -105,7 +117,7 @@ bondMaster:
     arpAllTargets: any
     primary: 3
     primaryReselect: better
-    failOverMac: 2
+    failOverMac: follow
     adSelect: count
     miimon: 33
     updelay: 100
@@ -122,6 +134,8 @@ bondMaster:
     adActorSysPrio: 6
     adUserPortKey: 7
     peerNotifyDelay: 40
+vrfMaster:
+    table: "123"
 wireguard:
     privateKey: foo=
     publicKey: bar=
@@ -134,6 +148,8 @@ wireguard:
           persistentKeepaliveInterval: 30s
           allowedIPs:
             - 192.83.93.94/31
+veth:
+    peerName: eth2
 layer: platform
 `,
 		string(marshaled))

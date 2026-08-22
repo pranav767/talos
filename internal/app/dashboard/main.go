@@ -39,15 +39,18 @@ func Main() {
 func dashboardMain() error {
 	startup.LimitMaxProcs(constants.DashboardMaxProcs)
 
-	md := metadata.Pairs()
-	authz.SetMetadata(md, role.MakeSet(role.Admin))
-
 	ctx, cancel := sigtermAwareContext(context.Background())
 	defer cancel()
 
+	go runDebugServer(ctx)
+
+	md := metadata.Pairs()
+	authz.SetMetadata(md, role.MakeSet(role.Reader, role.MetaWriter))
+
 	ctx = metadata.NewOutgoingContext(ctx, md)
 
-	c, err := client.New(ctx,
+	c, err := client.New(
+		ctx,
 		client.WithUnixSocket(constants.MachineSocketPath),
 		client.WithGRPCDialOptions(
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -68,6 +71,8 @@ func dashboardMain() error {
 			screens = append(screens, dashboard.ScreenConfigURL)
 		}
 	}
+
+	screens = append(screens, dashboard.ScreenResourceExplorer)
 
 	return dashboard.Run(ctx, c, dashboard.WithAllowExitKeys(false), dashboard.WithScreens(screens...))
 }

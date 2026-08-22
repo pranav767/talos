@@ -40,7 +40,10 @@ const (
 func MockEventSink(state events.ServiceState, message string, args ...any) {
 }
 
-//nolint:maligned
+func MockPidRecorder(serviceName string, pid int32, clearEntry bool) error {
+	return nil
+}
+
 type ContainerdSuite struct {
 	suite.Suite
 
@@ -124,7 +127,7 @@ func (suite *ContainerdSuite) SetupSuite() {
 	suite.containerdWg.Go(func() {
 		defer suite.containerdRunner.Close() //nolint:errcheck
 
-		suite.containerdRunner.Run(MockEventSink) //nolint:errcheck
+		suite.containerdRunner.Run(MockEventSink, MockPidRecorder) //nolint:errcheck
 	})
 
 	suite.client, err = containerd.New(suite.containerdAddress)
@@ -171,7 +174,7 @@ func (suite *ContainerdSuite) run(runners ...runner.Runner) {
 			defer func() { runningCh <- false }()
 			defer suite.containersWg.Done()
 
-			suite.Require().NoError(r.Run(runningSink))
+			suite.Require().NoError(r.Run(runningSink, MockPidRecorder))
 		}(r)
 	}
 
@@ -195,10 +198,11 @@ func (suite *ContainerdSuite) TearDownTest() {
 }
 
 func (suite *ContainerdSuite) runK8sContainers() {
-	suite.run(containerdrunner.NewRunner(false, &runner.Args{
-		ID:          suite.containerID + "1",
-		ProcessArgs: []string{"/bin/sh", "-c", "sleep 3600"},
-	},
+	suite.run(containerdrunner.NewRunner(
+		false, &runner.Args{
+			ID:          suite.containerID + "1",
+			ProcessArgs: []string{"/bin/sh", "-c", "sleep 3600"},
+		},
 		runner.WithLoggingManager(suite.loggingManager),
 		runner.WithNamespace(suite.containerdNamespace),
 		runner.WithContainerImage(busyboxImage),
@@ -211,10 +215,11 @@ func (suite *ContainerdSuite) runK8sContainers() {
 			"io.kubernetes.cri.sandbox-id":            "c888d69b73b5b444c2b0bd70da28c3da102b0aeb327f3a297626e2558def327f",
 		})),
 		runner.WithContainerdAddress(suite.containerdAddress),
-	), containerdrunner.NewRunner(false, &runner.Args{
-		ID:          suite.containerID + "2",
-		ProcessArgs: []string{"/bin/sh", "-c", "sleep 3600"},
-	},
+	), containerdrunner.NewRunner(
+		false, &runner.Args{
+			ID:          suite.containerID + "2",
+			ProcessArgs: []string{"/bin/sh", "-c", "sleep 3600"},
+		},
 		runner.WithLoggingManager(suite.loggingManager),
 		runner.WithNamespace(suite.containerdNamespace),
 		runner.WithContainerImage(busyboxImage),
@@ -231,10 +236,11 @@ func (suite *ContainerdSuite) runK8sContainers() {
 }
 
 func (suite *ContainerdSuite) TestPodsNonK8s() {
-	suite.run(containerdrunner.NewRunner(false, &runner.Args{
-		ID:          suite.containerID,
-		ProcessArgs: []string{"/bin/sh", "-c", "sleep 3600"},
-	},
+	suite.run(containerdrunner.NewRunner(
+		false, &runner.Args{
+			ID:          suite.containerID,
+			ProcessArgs: []string{"/bin/sh", "-c", "sleep 3600"},
+		},
 		runner.WithLoggingManager(suite.loggingManager),
 		runner.WithNamespace(suite.containerdNamespace),
 		runner.WithContainerImage(busyboxImage),
@@ -296,10 +302,11 @@ func (suite *ContainerdSuite) TestPodsK8s() {
 }
 
 func (suite *ContainerdSuite) TestContainerNonK8s() {
-	suite.run(containerdrunner.NewRunner(false, &runner.Args{
-		ID:          suite.containerID,
-		ProcessArgs: []string{"/bin/sh", "-c", "sleep 3600"},
-	},
+	suite.run(containerdrunner.NewRunner(
+		false, &runner.Args{
+			ID:          suite.containerID,
+			ProcessArgs: []string{"/bin/sh", "-c", "sleep 3600"},
+		},
 		runner.WithLoggingManager(suite.loggingManager),
 		runner.WithNamespace(suite.containerdNamespace),
 		runner.WithContainerImage(busyboxImage),

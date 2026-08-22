@@ -2,13 +2,13 @@
 (call system_f (init_exec_t))
 (context init_exec_t (system_u object_r init_exec_t (systemLow systemLow)))
 (filecon "/usr/bin/init" file init_exec_t)
-(filecon "/usr/bin/poweroff" any init_exec_t)
-(filecon "/usr/bin/shutdown" any init_exec_t)
-(filecon "/usr/bin/dashboard" any init_exec_t)
 
 (type init_t)
 (roletype system_r init_t)
 (allow init_t init_exec_t (file (execute entrypoint)))
+; machined runs at systemLow and labels, relabels and supervises every other
+; domain and file on the host, including any that carry MCS categories.
+(typeattributeset mcs_exempt_p init_t)
 
 ; System daemon sockets
 (type machine_socket_t)
@@ -19,6 +19,8 @@
 (call system_socket_f (dbus_client_socket_t))
 
 (allow init_t service_p (process (transition)))
+; (process2 nosuid_transition for init_t -> service_p lives in
+; common/processes.cil — single source for the allow rule.)
 ; Manage processes
 (allow init_t any_p (fs_classes (rw)))
 (allow init_t any_p (process_classes (full)))
@@ -98,6 +100,9 @@
 (allow initramfs_t init_exec_t (file (execute)))
 (typetransition initramfs_t init_exec_t process init_t)
 (allow initramfs_t init_t (process_classes (full)))
+; init_exec_t (/usr/bin/init) lives on the rootfs squashfs which is
+; mounted NOSUID — allow the initramfs_t → init_t transition across it.
+(allow initramfs_t init_t (process2 (nosuid_transition)))
 (allow init_t initramfs_t (fd (use)))
 
 ; Direct child processes

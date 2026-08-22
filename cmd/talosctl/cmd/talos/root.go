@@ -11,45 +11,53 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/siderolabs/gen/maps"
 	_ "github.com/siderolabs/proto-codec/codec" // register codec v2
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/peer"
 
 	"github.com/siderolabs/talos/cmd/talosctl/pkg/talos/global"
 	"github.com/siderolabs/talos/pkg/cli"
 	"github.com/siderolabs/talos/pkg/machinery/api/common"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	"github.com/siderolabs/talos/pkg/machinery/client"
+	"github.com/siderolabs/talos/pkg/machinery/client/multiplex"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
-	"github.com/siderolabs/talos/pkg/machinery/formatters"
 )
-
-var kubernetesFlag bool
 
 // GlobalArgs is the common arguments for the root command.
 var GlobalArgs global.Args
 
+// kubernetesNamespaceFlag is embedded into command flag structs that select between
+// the system and Kubernetes containerd namespaces via the --kubernetes flag.
+type kubernetesNamespaceFlag struct {
+	kubernetes bool
+}
+
+// useKubernetesNamespace reports whether the Kubernetes containerd namespace is selected.
+func (f kubernetesNamespaceFlag) useKubernetesNamespace() bool {
+	return f.kubernetes
+}
+
+// containerNamespaceFlags is implemented by command flag structs carrying the
+// --kubernetes namespace selector; used by the container completion helpers.
+type containerNamespaceFlags interface {
+	useKubernetesNamespace() bool
+}
+
 const pathAutoCompleteLimit = 500
 
-// WithClientNoNodes wraps common code to initialize Talos client and provide cancellable context.
-//
-// WithClientNoNodes doesn't set any node information on the request context.
-func WithClientNoNodes(action func(context.Context, *client.Client) error, dialOptions ...grpc.DialOption) error {
-	return GlobalArgs.WithClientNoNodes(action, dialOptions...)
-}
+// outputFlushInterval is the quiet period after the last multiplexed response
+// before flushing the tabwriter, so partial results appear without thrashing
+// column widths while responses are still arriving.
+const outputFlushInterval = 500 * time.Millisecond
 
-// WithClient builds upon WithClientNoNodes to provide set of nodes on request context based on config & flags.
-func WithClient(action func(context.Context, *client.Client) error, dialOptions ...grpc.DialOption) error {
-	return GlobalArgs.WithClient(action, dialOptions...)
-}
-
-// WithClientMaintenance wraps common code to initialize Talos client in maintenance (insecure mode).
-func WithClientMaintenance(enforceFingerprints []string, action func(context.Context, *client.Client) error) error {
-	return GlobalArgs.WithClientMaintenance(enforceFingerprints, action)
+// NewClientFactory creates a new ClientFactory.
+func NewClientFactory(ctx context.Context, flags any, dialOptions ...grpc.DialOption) (*global.ClientFactory, error) {
+	return global.NewClientFactory(ctx, &GlobalArgs, flags, dialOptions...)
 }
 
 // Commands is a list of commands published by the package.
@@ -60,7 +68,8 @@ func addCommand(cmd *cobra.Command) {
 		&GlobalArgs.Talosconfig,
 		"talosconfig",
 		"",
-		fmt.Sprintf("The path to the Talos configuration file. Defaults to '%s' env variable if set, otherwise '%s' and '%s' in order.",
+		fmt.Sprintf(
+			"the path to the Talos configuration file, defaults to '%s' env variable if set, otherwise '%s' and '%s' in order",
 			constants.TalosConfigEnvVar,
 			filepath.Join("$HOME", constants.TalosDir, constants.TalosconfigFilename),
 			filepath.Join(constants.ServiceAccountMountPath, constants.TalosconfigFilename),
@@ -68,25 +77,26 @@ func addCommand(cmd *cobra.Command) {
 	)
 	cmd.PersistentFlags().StringSliceVarP(&GlobalArgs.Nodes, "nodes", "n", []string{}, "target the specified nodes")
 	cmd.PersistentFlags().StringSliceVarP(&GlobalArgs.Endpoints, "endpoints", "e", []string{}, "override default endpoints in Talos configuration")
-	cli.Should(cmd.RegisterFlagCompletionFunc("nodes", CompleteNodes))
-	cmd.PersistentFlags().StringVarP(&GlobalArgs.Cluster, "cluster", "c", "", "Cluster to connect to if a proxy endpoint is used.")
-	cmd.PersistentFlags().StringVar(&GlobalArgs.CmdContext, "context", "", "Context to be used in command")
+	cli.Should(cmd.RegisterFlagCompletionFunc("nodes", completeNodes))
+	cmd.PersistentFlags().StringVarP(&GlobalArgs.Cluster, "cluster", "c", "", "cluster to connect to if a proxy endpoint is used")
+	cmd.PersistentFlags().StringVar(&GlobalArgs.CmdContext, "context", "", "context to be used in command")
 	cmd.PersistentFlags().StringVar(
 		&GlobalArgs.SideroV1KeysDir,
 		"siderov1-keys-dir",
 		"",
-		fmt.Sprintf("The path to the SideroV1 auth PGP keys directory. Defaults to '%s' env variable if set, otherwise '%s'. Only valid for Contexts that use SideroV1 auth.",
+		fmt.Sprintf(
+			"the path to the SideroV1 auth PGP keys directory, defaults to '%s' env variable if set, otherwise '%s'; only valid for Contexts that use SideroV1 auth",
 			constants.SideroV1KeysDirEnvVar,
 			filepath.Join("$HOME", constants.TalosDir, constants.SideroV1KeysDir),
 		),
 	)
-	cli.Should(cmd.RegisterFlagCompletionFunc("context", CompleteConfigContext))
+	cli.Should(cmd.RegisterFlagCompletionFunc("context", completeConfigContext))
 
 	Commands = append(Commands, cmd)
 }
 
 // completePathFromNode represents tab complete options for `ls` and `ls *` commands.
-func completePathFromNode(inputPath string) []string {
+func completePathFromNode(ctx context.Context, flags any, inputPath string) []string {
 	pathToSearch := inputPath
 
 	// If the pathToSearch is empty, use root '/'
@@ -103,147 +113,181 @@ func completePathFromNode(inputPath string) []string {
 		pathToSearch = pathToSearch[:index] + "/"
 	}
 
-	paths = getPathFromNode(pathToSearch, inputPath)
+	paths = getPathFromNode(ctx, flags, pathToSearch, inputPath)
 
 	return maps.Keys(paths)
 }
 
 //nolint:gocyclo
-func getPathFromNode(path, filter string) map[string]struct{} {
+func getPathFromNode(ctx context.Context, flags any, path, filter string) map[string]struct{} {
 	paths := make(map[string]struct{})
 
-	//nolint:errcheck
-	GlobalArgs.WithClient(
-		func(ctx context.Context, c *client.Client) error {
-			ctx, cancel := context.WithCancel(ctx)
-			defer cancel()
+	clientFactory, err := NewClientFactory(ctx, flags)
+	if err != nil {
+		cobra.CompError(fmt.Sprintf("error creating client factory: %v", err))
 
-			stream, err := c.LS(
-				ctx, &machineapi.ListRequest{
-					Root: path,
-				},
-			)
-			if err != nil {
-				return err
-			}
+		return paths
+	}
 
-			for {
-				resp, err := stream.Recv()
-				if err != nil {
-					if err == io.EOF || client.StatusCode(err) == codes.Canceled {
-						return nil
-					}
+	defer clientFactory.Close() //nolint:errcheck
 
-					return fmt.Errorf("error streaming results: %s", err)
-				}
+	ctx, c, err := clientFactory.BuildClientFirstNode(ctx)
+	if err != nil {
+		cobra.CompError(fmt.Sprintf("error building client: %v", err))
 
-				if resp.Metadata != nil && resp.Metadata.Error != "" {
-					continue
-				}
+		return paths
+	}
 
-				if resp.Error != "" {
-					continue
-				}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-				// skip reference to the same directory
-				if resp.RelativeName == "." {
-					continue
-				}
-
-				// limit the results to a reasonable amount
-				if len(paths) > pathAutoCompleteLimit {
-					return nil
-				}
-
-				// directories have a trailing slash
-				if resp.IsDir {
-					fullPath := path + resp.RelativeName + "/"
-
-					if relativeTo(fullPath, filter) {
-						paths[fullPath] = struct{}{}
-					}
-				} else {
-					fullPath := path + resp.RelativeName
-
-					if relativeTo(fullPath, filter) {
-						paths[fullPath] = struct{}{}
-					}
-				}
-			}
+	stream, err := c.LS(
+		ctx, &machineapi.ListRequest{
+			Root: path,
 		},
 	)
+	if err != nil {
+		cobra.CompError(fmt.Sprintf("error listing path: %v", err))
+
+		return paths
+	}
+
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF || client.StatusCode(err) == codes.Canceled {
+				break
+			}
+
+			cobra.CompError(fmt.Sprintf("error streaming results: %s", err))
+
+			break
+		}
+
+		if resp.Error != "" {
+			continue
+		}
+
+		// skip reference to the same directory
+		if resp.RelativeName == "." {
+			continue
+		}
+
+		// limit the results to a reasonable amount
+		if len(paths) > pathAutoCompleteLimit {
+			return nil
+		}
+
+		// directories have a trailing slash
+		if resp.IsDir {
+			fullPath := path + resp.RelativeName + "/"
+
+			if relativeTo(fullPath, filter) {
+				paths[fullPath] = struct{}{}
+			}
+		} else {
+			fullPath := path + resp.RelativeName
+
+			if relativeTo(fullPath, filter) {
+				paths[fullPath] = struct{}{}
+			}
+		}
+	}
 
 	return paths
 }
 
-func getServiceFromNode() []string {
-	var svcIDs []string
+func getServiceFromNode(ctx context.Context, flags any) []string {
+	clientFactory, err := NewClientFactory(ctx, flags)
+	if err != nil {
+		cobra.CompError(fmt.Sprintf("error creating client factory: %v", err))
 
-	//nolint:errcheck
-	GlobalArgs.WithClient(
-		func(ctx context.Context, c *client.Client) error {
-			var remotePeer peer.Peer
+		return nil
+	}
 
-			resp, err := c.ServiceList(ctx, grpc.Peer(&remotePeer))
-			if err != nil {
-				return err
-			}
+	defer clientFactory.Close() //nolint:errcheck
 
-			for _, msg := range resp.Messages {
-				for _, s := range msg.Services {
-					svc := formatters.ServiceInfoWrapper{ServiceInfo: s}
-					svcIDs = append(svcIDs, svc.Id)
-				}
-			}
-
-			return nil
+	responseChan := multiplex.UnaryViaFactory(
+		ctx, clientFactory,
+		func(ctx context.Context, c *client.Client) (*machineapi.ServiceListResponse, error) {
+			return c.ServiceList(ctx)
 		},
 	)
+
+	var svcIDs []string
+
+	for resp := range responseChan {
+		if resp.Err != nil {
+			cobra.CompError(fmt.Sprintf("error from node %s: %v", resp.Node, resp.Err))
+
+			continue
+		}
+
+		for _, msg := range resp.Payload.Messages {
+			for _, s := range msg.Services {
+				svcIDs = append(svcIDs, s.Id)
+			}
+		}
+	}
 
 	return svcIDs
 }
 
-func getContainersFromNode(kubernetes bool) []string {
-	var containerIDs []string
+func getContainersFromNode(ctx context.Context, flags containerNamespaceFlags) []string {
+	clientFactory, err := NewClientFactory(ctx, flags)
+	if err != nil {
+		cobra.CompError(fmt.Sprintf("error creating client factory: %v", err))
 
-	//nolint:errcheck
-	GlobalArgs.WithClient(
-		func(ctx context.Context, c *client.Client) error {
-			var (
-				namespace string
-				driver    common.ContainerDriver
-			)
+		return nil
+	}
 
-			if kubernetes {
-				namespace = constants.K8sContainerdNamespace
-				driver = common.ContainerDriver_CRI
-			} else {
-				namespace = constants.SystemContainerdNamespace
-				driver = common.ContainerDriver_CONTAINERD
-			}
+	defer clientFactory.Close() //nolint:errcheck
 
-			resp, err := c.Containers(ctx, namespace, driver)
-			if err != nil {
-				return err
-			}
+	kubernetes := flags.useKubernetesNamespace()
 
-			for _, msg := range resp.Messages {
-				for _, p := range msg.Containers {
-					if p.Pid == 0 {
-						continue
-					}
+	var (
+		namespace string
+		driver    common.ContainerDriver
+	)
 
-					if kubernetes && p.Id == p.PodId {
-						continue
-					}
+	if kubernetes {
+		namespace = constants.K8sContainerdNamespace
+		driver = common.ContainerDriver_CRI
+	} else {
+		namespace = constants.SystemContainerdNamespace
+		driver = common.ContainerDriver_CONTAINERD
+	}
 
-					containerIDs = append(containerIDs, p.Id)
-				}
-			}
-
-			return nil
+	responseChan := multiplex.UnaryViaFactory(
+		ctx, clientFactory,
+		func(ctx context.Context, c *client.Client) (*machineapi.ContainersResponse, error) {
+			return c.Containers(ctx, namespace, driver)
 		},
 	)
+
+	var containerIDs []string
+
+	for resp := range responseChan {
+		if resp.Err != nil {
+			cobra.CompError(fmt.Sprintf("error from node %s: %v", resp.Node, resp.Err))
+
+			continue
+		}
+
+		for _, msg := range resp.Payload.Messages {
+			for _, p := range msg.Containers {
+				if p.Pid == 0 {
+					continue
+				}
+
+				if kubernetes && p.Id == p.PodId {
+					continue
+				}
+
+				containerIDs = append(containerIDs, p.Id)
+			}
+		}
+	}
 
 	return containerIDs
 }

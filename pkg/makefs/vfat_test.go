@@ -5,16 +5,42 @@
 package makefs_test
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/siderolabs/go-cmd/pkg/cmd"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/siderolabs/talos/pkg/makefs"
 )
+
+func TestVFATCustomSectorSize(t *testing.T) {
+	if _, err := exec.LookPath("minfo"); err != nil {
+		t.Skip("minfo not found in PATH, skipping test")
+	}
+
+	tempDir := t.TempDir()
+	vfatImg := filepath.Join(tempDir, "test.img")
+
+	f, err := os.Create(vfatImg)
+	require.NoError(t, err)
+	require.NoError(t, f.Truncate(32*1024*1024))
+	require.NoError(t, f.Close())
+
+	require.NoError(t, makefs.VFAT(t.Context(), vfatImg, makefs.WithLabel("TEST"), makefs.WithSectorSize(4096)))
+
+	var stdout bytes.Buffer
+
+	c := exec.CommandContext(t.Context(), "minfo", "-i", vfatImg)
+	c.Stdout = &stdout
+	require.NoError(t, c.Run())
+
+	assert.Contains(t, stdout.String(), "sector size: 4096 bytes")
+}
 
 func TestVFATWithSourceDirectory(t *testing.T) {
 	_, err := exec.LookPath("mcopy")
@@ -51,7 +77,7 @@ func TestVFATWithSourceDirectory(t *testing.T) {
 	require.NoError(t, os.MkdirAll(extractDir, 0o755))
 
 	// Extract all files
-	_, err = cmd.Run("mcopy", "-s", "-i", vfatImg, "::/", extractDir)
+	_, err = cmd.RunWithOptions(t.Context(), "mcopy", []string{"-s", "-i", vfatImg, "::/", extractDir})
 	require.NoError(t, err)
 
 	// Verify extracted files with full filenames

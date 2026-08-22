@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 
@@ -17,6 +16,7 @@ import (
 	netctrl "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/network"
 	configtypes "github.com/siderolabs/talos/pkg/machinery/config/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/container"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/meta"
 	networkcfg "github.com/siderolabs/talos/pkg/machinery/config/types/network"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
@@ -41,7 +41,7 @@ func (suite *NfTablesChainConfigTestSuite) injectConfig(block bool) {
 	kubeletIngressCfg.Ingress = []networkcfg.IngressRule{
 		{
 			Subnet: netip.MustParsePrefix("10.0.0.0/8"),
-			Except: networkcfg.Prefix{Prefix: netip.MustParsePrefix("10.3.0.0/16")},
+			Except: meta.Prefix{Prefix: netip.MustParsePrefix("10.3.0.0/16")},
 		},
 		{
 			Subnet: netip.MustParsePrefix("192.168.0.0/16"),
@@ -107,7 +107,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultAccept() {
 						Operator: nethelpers.OperatorEqual,
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchSourceAddress: &network.NfTablesAddressMatch{
@@ -132,7 +132,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultAccept() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictDrop),
+					Verdict:     new(nethelpers.VerdictDrop),
 				},
 				{
 					MatchSourceAddress: &network.NfTablesAddressMatch{
@@ -153,10 +153,11 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultAccept() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictDrop),
+					Verdict:     new(nethelpers.VerdictDrop),
 				},
 			},
-			spec.Rules)
+			spec.Rules,
+		)
 	})
 
 	ctest.AssertResource(suite, netctrl.PreroutingChainName, func(chain *network.NfTablesChain, asrt *assert.Assertions) {
@@ -179,7 +180,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultAccept() {
 						Operator: nethelpers.OperatorEqual,
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchDestinationAddress: &network.NfTablesAddressMatch{
@@ -189,7 +190,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultAccept() {
 						Invert: true,
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchConntrackState: &network.NfTablesConntrackStateMatch{
@@ -219,7 +220,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultAccept() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictDrop),
+					Verdict:     new(nethelpers.VerdictDrop),
 				},
 				{
 					MatchConntrackState: &network.NfTablesConntrackStateMatch{
@@ -245,10 +246,11 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultAccept() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictDrop),
+					Verdict:     new(nethelpers.VerdictDrop),
 				},
 			},
-			spec.Rules)
+			spec.Rules,
+		)
 	})
 }
 
@@ -277,7 +279,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						Operator: nethelpers.OperatorEqual,
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchConntrackState: &network.NfTablesConntrackStateMatch{
@@ -287,7 +289,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchConntrackState: &network.NfTablesConntrackStateMatch{
@@ -296,7 +298,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictDrop),
+					Verdict:     new(nethelpers.VerdictDrop),
 				},
 				{
 					MatchLayer4: &network.NfTablesLayer4Match{
@@ -311,7 +313,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictDrop),
+					Verdict:     new(nethelpers.VerdictDrop),
 				},
 				{
 					MatchLayer4: &network.NfTablesLayer4Match{
@@ -321,7 +323,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						PacketRatePerSecond: 5,
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchLayer4: &network.NfTablesLayer4Match{
@@ -331,7 +333,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						PacketRatePerSecond: 5,
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchSourceAddress: &network.NfTablesAddressMatch{
@@ -355,7 +357,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchSourceAddress: &network.NfTablesAddressMatch{
@@ -375,10 +377,11 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 			},
-			spec.Rules)
+			spec.Rules,
+		)
 	})
 
 	ctest.AssertResource(suite, netctrl.PreroutingChainName, func(chain *network.NfTablesChain, asrt *assert.Assertions) {
@@ -401,7 +404,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						Operator: nethelpers.OperatorEqual,
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchDestinationAddress: &network.NfTablesAddressMatch{
@@ -411,7 +414,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						Invert: true,
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchConntrackState: &network.NfTablesConntrackStateMatch{
@@ -440,7 +443,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchConntrackState: &network.NfTablesConntrackStateMatch{
@@ -465,7 +468,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						},
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictAccept),
+					Verdict:     new(nethelpers.VerdictAccept),
 				},
 				{
 					MatchConntrackState: &network.NfTablesConntrackStateMatch{
@@ -477,7 +480,7 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						Protocol: nethelpers.ProtocolTCP,
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictDrop),
+					Verdict:     new(nethelpers.VerdictDrop),
 				},
 				{
 					MatchConntrackState: &network.NfTablesConntrackStateMatch{
@@ -489,10 +492,11 @@ func (suite *NfTablesChainConfigTestSuite) TestDefaultBlock() {
 						Protocol: nethelpers.ProtocolUDP,
 					},
 					AnonCounter: true,
-					Verdict:     pointer.To(nethelpers.VerdictDrop),
+					Verdict:     new(nethelpers.VerdictDrop),
 				},
 			},
-			spec.Rules)
+			spec.Rules,
+		)
 	})
 }
 

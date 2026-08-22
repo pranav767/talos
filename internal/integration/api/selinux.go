@@ -90,11 +90,11 @@ func (suite *SELinuxSuite) TestFileMountLabels() {
 		constants.RunPath:             constants.RunSelinuxLabel,
 		"/run/containerd":             "system_u:object_r:pod_containerd_run_t:s0",
 		"/run/lock":                   "system_u:object_r:var_lock_t:s0",
+		"/run/lock/lvm":               "system_u:object_r:var_lock_t:s0",
 		constants.SystemRunPath:       "system_u:object_r:system_run_t:s0",
 		"/var/run":                    constants.RunSelinuxLabel,
 		// Runtime files
 		constants.APIRuntimeSocketPath:  constants.APIRuntimeSocketLabel,
-		constants.APISocketPath:         constants.APISocketLabel,
 		constants.DBusClientSocketPath:  constants.DBusClientSocketLabel,
 		constants.UdevRulesPath:         constants.UdevRulesLabel,
 		constants.DBusServiceSocketPath: constants.DBusServiceSocketLabel,
@@ -102,7 +102,6 @@ func (suite *SELinuxSuite) TestFileMountLabels() {
 		// Overlays
 		"/etc/cni":                        constants.CNISELinuxLabel,
 		constants.KubernetesConfigBaseDir: constants.KubernetesConfigSELinuxLabel,
-		"/usr/libexec/kubernetes":         constants.KubeletPluginsSELinuxLabel,
 		"/opt":                            constants.OptSELinuxLabel,
 		"/opt/cni":                        "system_u:object_r:cni_plugin_t:s0",
 		"/opt/containerd":                 "system_u:object_r:containerd_plugin_t:s0",
@@ -203,7 +202,22 @@ func (suite *SELinuxSuite) checkFileLabels(nodes []string, expectedLabels map[st
 					return nil
 				}
 
-				suite.Require().NotNil(info.Xattrs)
+				// these are symlinks that comes from files from extensions, and we don't set xattrs for extensions yet
+				// TODO(frezbo): update the test to check for correct labels once we set xattrs for extensions
+				switch info.Name {
+				case "/etc/ld.so.conf", "/etc/ld.so.cache":
+					return nil
+				case "/usr/bin/nvidia-smi":
+					return nil
+				case "/usr/bin/nvidia-ctk":
+					return nil
+				case "/usr/bin/nvidia-cdi-hook":
+					return nil
+				case "/usr/bin/nvme":
+					return nil
+				}
+
+				suite.Require().NotNil(info.Xattrs, "expected %s to have xattrs (checking %s)", info.Name, path)
 
 				found := false
 
@@ -218,7 +232,7 @@ func (suite *SELinuxSuite) checkFileLabels(nodes []string, expectedLabels map[st
 					}
 				}
 
-				suite.Require().True(found)
+				suite.Require().True(found, "expected to find security.selinux xattr for %s (checking %s)", info.Name, path)
 
 				return nil
 			})

@@ -8,7 +8,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/cosi-project/runtime/pkg/controller"
@@ -28,6 +30,7 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/siderolabs/talos/pkg/httpdefaults"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"github.com/siderolabs/talos/pkg/machinery/resources/secrets"
@@ -51,11 +54,60 @@ func NewClientFromKubeletKubeconfig() (*Client, error) {
 		return nil, err
 	}
 
+	// Set an explicit dial timeout so that requests to a stale/unreachable
+	// API server endpoint fail fast instead of hanging indefinitely at the TCP
+	// layer (the default Linux tcp_syn_retries can cause connect() to block for
+	// over two minutes). This only affects establishing new TCP connections,
+	// not the lifetime of in-flight watches.
+	config.Dial = (&net.Dialer{
+		Timeout:   15 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+
+	config.UserAgent = httpdefaults.UserAgent()
+
 	return NewForConfig(config)
+}
+
+func loadPKIIntoVariable(data *[]byte, path *string) error {
+	if len(*data) > 0 {
+		return nil
+	}
+
+	if *path == "" {
+		return fmt.Errorf("no certificate data or file provided")
+	}
+
+	pkiData, err := os.ReadFile(*path)
+	if err != nil {
+		return fmt.Errorf("failed to read certificate file: %w", err)
+	}
+
+	*data = pkiData
+	*path = ""
+
+	return nil
 }
 
 // NewForConfig initializes and returns a client using the provided config.
 func NewForConfig(config *restclient.Config) (*Client, error) {
+	// read the certificates into byte slices to prevent the client from launching automatic
+	// certificate reload
+	if err := loadPKIIntoVariable(&config.TLSClientConfig.CAData, &config.TLSClientConfig.CAFile); err != nil {
+		return nil, fmt.Errorf("failed to load CA certificate: %w", err)
+	}
+
+	if err := loadPKIIntoVariable(&config.TLSClientConfig.CertData, &config.TLSClientConfig.CertFile); err != nil {
+		return nil, fmt.Errorf("failed to load client certificate: %w", err)
+	}
+
+	if err := loadPKIIntoVariable(&config.TLSClientConfig.KeyData, &config.TLSClientConfig.KeyFile); err != nil {
+		return nil, fmt.Errorf("failed to load client key: %w", err)
+	}
+
+	config.UserAgent = httpdefaults.UserAgent()
+
+	// now, initialize the client using the standard method
 	client, err := taloskubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, err
@@ -67,8 +119,6 @@ func NewForConfig(config *restclient.Config) (*Client, error) {
 }
 
 // NewClientFromPKI initializes and returns a Client.
-//
-//nolint:interfacer
 func NewClientFromPKI(ca, crt, key []byte, endpoint *url.URL) (*Client, error) {
 	tlsClientConfig := restclient.TLSClientConfig{
 		CAData:   ca,

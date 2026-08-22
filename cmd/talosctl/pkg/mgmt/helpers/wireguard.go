@@ -10,12 +10,12 @@ import (
 	"time"
 
 	"github.com/siderolabs/gen/xslices"
-	"github.com/siderolabs/go-pointer"
 	sideronet "github.com/siderolabs/net"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/siderolabs/talos/pkg/machinery/config/configpatcher"
 	"github.com/siderolabs/talos/pkg/machinery/config/container"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/meta"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/network"
 )
 
@@ -44,7 +44,7 @@ func NewWireguardConfigBundle(ips []netip.Addr, wireguardCidr string, listenPort
 		keys[i] = key
 
 		peers[i] = network.WireguardPeer{
-			WireguardAllowedIPs: []network.Prefix{
+			WireguardAllowedIPs: []meta.Prefix{
 				{
 					Prefix: netip.PrefixFrom(wgAddr, wgAddr.BitLen()),
 				},
@@ -54,7 +54,7 @@ func NewWireguardConfigBundle(ips []netip.Addr, wireguardCidr string, listenPort
 		}
 
 		if i < controlplanesCount {
-			peers[i].WireguardEndpoint = network.AddrPort{AddrPort: netip.AddrPortFrom(ip, uint16(listenPort))}
+			peers[i].WireguardEndpoint = meta.AddrPort{AddrPort: netip.AddrPortFrom(ip, uint16(listenPort))}
 		}
 	}
 
@@ -75,7 +75,7 @@ func NewWireguardConfigBundle(ips []netip.Addr, wireguardCidr string, listenPort
 				AddressAddress: netip.PrefixFrom(wgAddr, wgCidr.Bits()),
 			},
 		}
-		config.LinkUp = pointer.To(true)
+		config.LinkUp = new(true)
 		config.LinkMTU = 1500
 
 		if i < controlplanesCount {

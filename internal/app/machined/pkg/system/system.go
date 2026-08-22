@@ -39,8 +39,12 @@ type singleton struct {
 	runningMu sync.Mutex
 	running   map[string]struct{}
 
-	mu          sync.Mutex
-	wg          sync.WaitGroup
+	mu sync.Mutex
+	wg sync.WaitGroup
+
+	// denyNewServices is set on DenyNewServices, and it rejects any further Load/Start calls, used on Talos shutdown/reboot paths.
+	denyNewServices bool
+	// terminating is set on Shutdown, and it rejects any further Load/Start/Stop calls, and allows Shutdown to proceed without deadlock.
 	terminating bool
 }
 
@@ -59,7 +63,7 @@ func newServices(runtime runtime.Runtime) *singleton {
 
 // Services returns the instance of the system services API.
 //
-//nolint:revive,golint
+//nolint:revive
 func Services(runtime runtime.Runtime) *singleton {
 	once.Do(func() {
 		instance = newServices(runtime)
@@ -75,7 +79,7 @@ func (s *singleton) Load(services ...Service) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.terminating {
+	if s.terminating || s.denyNewServices {
 		return nil
 	}
 
@@ -144,7 +148,7 @@ func (s *singleton) Start(serviceIDs ...string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.terminating {
+	if s.terminating || s.denyNewServices {
 		return nil
 	}
 
@@ -361,12 +365,12 @@ func (s *singleton) stopServices(ctx context.Context, services []string, waitFor
 	for name, svcrunner := range servicesToStop {
 		shutdownWg.Add(1)
 
-		stoppedConds = append(stoppedConds, waitForService(s, StateEventDown, name))
+		stoppedConds = append(stoppedConds, waitForService(s, []StateEvent{StateEventDown}, name))
 
 		go func(svcrunner *ServiceRunner, reverseDeps []string) {
 			defer shutdownWg.Done()
 
-			conds := xslices.Map(reverseDeps, func(dep string) conditions.Condition { return waitForService(s, StateEventDown, dep) })
+			conds := xslices.Map(reverseDeps, func(dep string) conditions.Condition { return waitForService(s, []StateEvent{StateEventDown}, dep) })
 			allDeps := conditions.WaitForAll(conds...)
 
 			if err := allDeps.Wait(shutdownCtx); err != nil {
@@ -475,4 +479,12 @@ func (s *singleton) APIRestart(ctx context.Context, id string) error {
 	}
 
 	return fmt.Errorf("service %q doesn't support restart operation via API", id)
+}
+
+// DenyNewServices sets the denyNewServices flag, which prevents any new services from being loaded or started.
+func (s *singleton) DenyNewServices() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.denyNewServices = true
 }

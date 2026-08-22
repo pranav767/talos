@@ -2,29 +2,21 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-//nolint:dupl
 package k8s_test
 
 import (
-	"context"
 	"net/url"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/cosi-project/runtime/pkg/controller/runtime"
-	"github.com/cosi-project/runtime/pkg/resource"
-	"github.com/cosi-project/runtime/pkg/state"
-	"github.com/cosi-project/runtime/pkg/state/impl/inmem"
-	"github.com/cosi-project/runtime/pkg/state/impl/namespaced"
 	"github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/siderolabs/go-pointer"
-	"github.com/siderolabs/go-retry/retry"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
-	"go.uber.org/zap/zaptest"
 
+	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/ctest"
 	k8sctrl "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/k8s"
 	"github.com/siderolabs/talos/pkg/machinery/config/container"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/meta"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
@@ -32,36 +24,7 @@ import (
 )
 
 type KubeletConfigSuite struct {
-	suite.Suite
-
-	state state.State
-
-	runtime *runtime.Runtime
-	wg      sync.WaitGroup
-
-	ctx       context.Context //nolint:containedctx
-	ctxCancel context.CancelFunc
-}
-
-func (suite *KubeletConfigSuite) SetupTest() {
-	suite.ctx, suite.ctxCancel = context.WithTimeout(context.Background(), 3*time.Minute)
-
-	suite.state = state.WrapCore(namespaced.NewState(inmem.Build))
-
-	var err error
-
-	suite.runtime, err = runtime.NewRuntime(suite.state, zaptest.NewLogger(suite.T()))
-	suite.Require().NoError(err)
-
-	suite.Require().NoError(suite.runtime.RegisterController(k8sctrl.NewKubeletConfigController()))
-
-	suite.startRuntime()
-}
-
-func (suite *KubeletConfigSuite) startRuntime() {
-	suite.wg.Go(func() {
-		suite.Assert().NoError(suite.runtime.Run(suite.ctx))
-	})
+	ctest.DefaultSuite
 }
 
 func (suite *KubeletConfigSuite) createStaticPodServerStatus() {
@@ -69,7 +32,7 @@ func (suite *KubeletConfigSuite) createStaticPodServerStatus() {
 
 	staticPodServerStatus.TypedSpec().URL = "http://127.0.0.1:12345"
 
-	suite.Require().NoError(suite.state.Create(suite.ctx, staticPodServerStatus))
+	suite.Create(staticPodServerStatus)
 }
 
 func (suite *KubeletConfigSuite) TestReconcile() {
@@ -83,11 +46,11 @@ func (suite *KubeletConfigSuite) TestReconcile() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineKubelet: &v1alpha1.KubeletConfig{
+					MachineKubelet: &v1alpha1.KubeletConfig{ //nolint:staticcheck // legacy config
 						KubeletImage:      "kubelet",
 						KubeletClusterDNS: []string{"10.0.0.1"},
-						KubeletExtraArgs: map[string]string{
-							"enable-feature": "foo",
+						KubeletExtraArgs: meta.Args{
+							"enable-feature": meta.NewArgValue("foo", nil),
 						},
 						KubeletExtraMounts: []v1alpha1.ExtraMount{
 							{
@@ -96,12 +59,12 @@ func (suite *KubeletConfigSuite) TestReconcile() {
 								Type:        "tmpfs",
 							},
 						},
-						KubeletExtraConfig: v1alpha1.Unstructured{
+						KubeletExtraConfig: meta.Unstructured{
 							Object: map[string]any{
 								"serverTLSBootstrap": true,
 							},
 						},
-						KubeletDefaultRuntimeSeccompProfileEnabled: pointer.To(true),
+						KubeletDefaultRuntimeSeccompProfileEnabled: new(true),
 					},
 				},
 				ClusterConfig: &v1alpha1.ClusterConfig{
@@ -111,7 +74,7 @@ func (suite *KubeletConfigSuite) TestReconcile() {
 						},
 					},
 					ExternalCloudProviderConfig: &v1alpha1.ExternalCloudProviderConfig{
-						ExternalEnabled: pointer.To(true),
+						ExternalEnabled: new(true),
 					},
 					ClusterNetwork: &v1alpha1.ClusterNetworkConfig{
 						DNSDomain: "service.svc",
@@ -121,62 +84,39 @@ func (suite *KubeletConfigSuite) TestReconcile() {
 		),
 	)
 
-	suite.Require().NoError(suite.state.Create(suite.ctx, cfg))
+	suite.Create(cfg)
 
-	suite.Assert().NoError(
-		retry.Constant(10*time.Second, retry.WithUnits(100*time.Millisecond)).Retry(
-			func() error {
-				kubeletConfig, err := suite.state.Get(
-					suite.ctx,
-					resource.NewMetadata(
-						k8s.NamespaceName,
-						k8s.KubeletConfigType,
-						k8s.KubeletID,
-						resource.VersionUndefined,
-					),
-				)
-				if err != nil {
-					if state.IsNotFoundError(err) {
-						return retry.ExpectedError(err)
-					}
+	ctest.AssertResource(suite, k8s.KubeletID, func(r *k8s.KubeletConfig, asrt *assert.Assertions) {
+		spec := r.TypedSpec()
 
-					return err
-				}
-
-				spec := kubeletConfig.(*k8s.KubeletConfig).TypedSpec()
-
-				suite.Assert().Equal("kubelet", spec.Image)
-				suite.Assert().Equal([]string{"10.0.0.1"}, spec.ClusterDNS)
-				suite.Assert().Equal("service.svc", spec.ClusterDomain)
-				suite.Assert().Equal(
-					map[string]string{
-						"enable-feature": "foo",
-					},
-					spec.ExtraArgs,
-				)
-				suite.Assert().Equal(
-					[]specs.Mount{
-						{
-							Destination: "/tmp",
-							Source:      "/var",
-							Type:        "tmpfs",
-						},
-					},
-					spec.ExtraMounts,
-				)
-				suite.Assert().Equal(
-					map[string]any{
-						"serverTLSBootstrap": true,
-					},
-					spec.ExtraConfig,
-				)
-				suite.Assert().True(spec.CloudProviderExternal)
-				suite.Assert().True(spec.DefaultRuntimeSeccompEnabled)
-
-				return nil
+		asrt.Equal("kubelet", spec.Image)
+		asrt.Equal([]string{"10.0.0.1"}, spec.ClusterDNS)
+		asrt.Equal("service.svc", spec.ClusterDomain)
+		asrt.Equal(
+			map[string]k8s.ArgValues{
+				"enable-feature": {Values: []string{"foo"}},
 			},
-		),
-	)
+			spec.ExtraArgs,
+		)
+		asrt.Equal(
+			[]specs.Mount{
+				{
+					Destination: "/tmp",
+					Source:      "/var",
+					Type:        "tmpfs",
+				},
+			},
+			spec.ExtraMounts,
+		)
+		asrt.Equal(
+			map[string]any{
+				"serverTLSBootstrap": true,
+			},
+			spec.ExtraConfig,
+		)
+		asrt.True(spec.CloudProviderExternal)
+		asrt.True(spec.DefaultRuntimeSeccompEnabled)
+	})
 }
 
 func (suite *KubeletConfigSuite) TestReconcileDefaults() {
@@ -190,7 +130,7 @@ func (suite *KubeletConfigSuite) TestReconcileDefaults() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineKubelet: &v1alpha1.KubeletConfig{
+					MachineKubelet: &v1alpha1.KubeletConfig{ //nolint:staticcheck // legacy config
 						KubeletImage: "kubelet",
 					},
 				},
@@ -201,60 +141,36 @@ func (suite *KubeletConfigSuite) TestReconcileDefaults() {
 						},
 					},
 					ClusterNetwork: &v1alpha1.ClusterNetworkConfig{
-						ServiceSubnet: []string{constants.DefaultIPv4ServiceNet},
+						ServiceSubnet: []string{constants.DefaultIPv4ServiceCIDR},
 					},
 				},
 			},
 		),
 	)
 
-	suite.Require().NoError(suite.state.Create(suite.ctx, cfg))
+	suite.Create(cfg)
 
-	suite.Assert().NoError(
-		retry.Constant(10*time.Second, retry.WithUnits(100*time.Millisecond)).Retry(
-			func() error {
-				kubeletConfig, err := suite.state.Get(
-					suite.ctx,
-					resource.NewMetadata(
-						k8s.NamespaceName,
-						k8s.KubeletConfigType,
-						k8s.KubeletID,
-						resource.VersionUndefined,
-					),
-				)
-				if err != nil {
-					if state.IsNotFoundError(err) {
-						return retry.ExpectedError(err)
-					}
+	ctest.AssertResource(suite, k8s.KubeletID, func(r *k8s.KubeletConfig, asrt *assert.Assertions) {
+		spec := r.TypedSpec()
 
-					return err
-				}
-
-				spec := kubeletConfig.(*k8s.KubeletConfig).TypedSpec()
-
-				suite.Assert().Equal("kubelet", spec.Image)
-				suite.Assert().Equal([]string{"10.96.0.10"}, spec.ClusterDNS)
-				suite.Assert().Equal(constants.DefaultDNSDomain, spec.ClusterDomain)
-				suite.Assert().Empty(spec.ExtraArgs)
-				suite.Assert().Empty(spec.ExtraMounts)
-				suite.Assert().False(spec.CloudProviderExternal)
-
-				return nil
-			},
-		),
-	)
-}
-
-func (suite *KubeletConfigSuite) TearDownTest() {
-	suite.T().Log("tear down")
-
-	suite.ctxCancel()
-
-	suite.wg.Wait()
+		asrt.Equal("kubelet", spec.Image)
+		asrt.Equal([]string{"10.96.0.10"}, spec.ClusterDNS)
+		asrt.Equal(constants.DefaultDNSDomain, spec.ClusterDomain)
+		asrt.Empty(spec.ExtraArgs)
+		asrt.Empty(spec.ExtraMounts)
+		asrt.False(spec.CloudProviderExternal)
+	})
 }
 
 func TestKubeletConfigSuite(t *testing.T) {
 	t.Parallel()
 
-	suite.Run(t, new(KubeletConfigSuite))
+	suite.Run(t, &KubeletConfigSuite{
+		DefaultSuite: ctest.DefaultSuite{
+			Timeout: 10 * time.Second,
+			AfterSetup: func(suite *ctest.DefaultSuite) {
+				suite.Require().NoError(suite.Runtime().RegisterController(k8sctrl.NewKubeletConfigController()))
+			},
+		},
+	})
 }

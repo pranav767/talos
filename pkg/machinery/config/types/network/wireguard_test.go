@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -35,15 +34,15 @@ func TestWireguardConfigMarshalStability(t *testing.T) {
 	cfg.WireguardPeers = []network.WireguardPeer{
 		{
 			WireguardPublicKey:  "735jkJdcVDninU5PzLJ/S+bfN6Q3QOk6svWrVLMJQAk=",
-			WireguardAllowedIPs: []network.Prefix{{netip.MustParsePrefix("192.168.1.0/24")}},
+			WireguardAllowedIPs: []meta.Prefix{{Prefix: netip.MustParsePrefix("192.168.1.0/24")}},
 		},
 		{
 			WireguardPublicKey:    "uvdlJNva1X8/OCOZM+0gGT4Yu9x20odd3AWbbQUF7nM=",
 			WireguardPresharedKey: "6j4UMxwszrHVZZUjY8/SFsZMjgaHkxV7yp9Tz05btho=",
-			WireguardEndpoint:     network.AddrPort{netip.MustParseAddrPort("10.3.4.3:2222")},
+			WireguardEndpoint:     meta.AddrPort{AddrPort: netip.MustParseAddrPort("10.3.4.3:2222")},
 		},
 	}
-	cfg.LinkUp = pointer.To(true)
+	cfg.LinkUp = new(true)
 	cfg.LinkAddresses = []network.AddressConfig{
 		{
 			AddressAddress: netip.MustParsePrefix("192.168.1.100/32"),
@@ -95,16 +94,16 @@ func TestWireguardConfigUnmarshal(t *testing.T) {
 		WireguardPeers: []network.WireguardPeer{
 			{
 				WireguardPublicKey:  "735jkJdcVDninU5PzLJ/S+bfN6Q3QOk6svWrVLMJQAk=",
-				WireguardAllowedIPs: []network.Prefix{{netip.MustParsePrefix("192.168.1.0/24")}},
+				WireguardAllowedIPs: []meta.Prefix{{Prefix: netip.MustParsePrefix("192.168.1.0/24")}},
 			},
 			{
 				WireguardPublicKey:    "uvdlJNva1X8/OCOZM+0gGT4Yu9x20odd3AWbbQUF7nM=",
 				WireguardPresharedKey: "6j4UMxwszrHVZZUjY8/SFsZMjgaHkxV7yp9Tz05btho=",
-				WireguardEndpoint:     network.AddrPort{netip.MustParseAddrPort("10.3.4.3:2222")},
+				WireguardEndpoint:     meta.AddrPort{AddrPort: netip.MustParseAddrPort("10.3.4.3:2222")},
 			},
 		},
 		CommonLinkConfig: network.CommonLinkConfig{
-			LinkUp: pointer.To(true),
+			LinkUp: new(true),
 			LinkAddresses: []network.AddressConfig{
 				{
 					AddressAddress: netip.MustParsePrefix("192.168.1.100/32"),
@@ -186,21 +185,21 @@ func TestWireguardValidate(t *testing.T) {
 				cfg.WireguardPeers = []network.WireguardPeer{
 					{
 						WireguardPublicKey:  "735jkJdcVDninU5PzLJ/S+bfN6Q3QOk6svWrVLMJQAk=",
-						WireguardAllowedIPs: []network.Prefix{{netip.MustParsePrefix("192.168.1.0/24")}},
+						WireguardAllowedIPs: []meta.Prefix{{Prefix: netip.MustParsePrefix("192.168.1.0/24")}},
 					},
 					{
 						WireguardPublicKey:    "uvdlJNva1X8/OCOZM+0gGT4Yu9x20odd3AWbbQUF7nM=",
 						WireguardPresharedKey: "6j4UMxwszrHVZZUjY8/SFsZMjgaHkxV7yp9Tz05btho=",
-						WireguardEndpoint:     network.AddrPort{netip.MustParseAddrPort("10.3.4.3:2222")},
+						WireguardEndpoint:     meta.AddrPort{AddrPort: netip.MustParseAddrPort("10.3.4.3:2222")},
 					},
 				}
 				cfg.LinkRoutes = []network.RouteConfig{
 					{
-						RouteDestination: network.Prefix{netip.MustParsePrefix("10.3.5.0/24")},
-						RouteGateway:     network.Addr{netip.MustParseAddr("10.3.5.1")},
+						RouteDestination: meta.Prefix{Prefix: netip.MustParsePrefix("10.3.5.0/24")},
+						RouteGateway:     meta.Addr{Addr: netip.MustParseAddr("10.3.5.1")},
 					},
 					{
-						RouteGateway: network.Addr{netip.MustParseAddr("fe80::1")},
+						RouteGateway: meta.Addr{Addr: netip.MustParseAddr("fe80::1")},
 					},
 				}
 

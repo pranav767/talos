@@ -12,13 +12,13 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/siderolabs/crypto/x509"
 	"github.com/siderolabs/gen/xslices"
-	taloskubernetes "github.com/siderolabs/go-kubernetes/kubernetes"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,11 +34,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/connrotation"
 	"k8s.io/client-go/util/workqueue"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -99,12 +97,11 @@ type CRDController struct {
 
 	kubeClient    kubernetes.Interface
 	dynamicClient dynamic.Interface
-	dialer        *connrotation.Dialer
+	httpClient    *http.Client
 
 	secretsSynced  cache.InformerSynced
 	talosSAsSynced cache.InformerSynced
 
-	secretsLister corelisters.SecretLister
 	dynamicLister dynamiclister.Lister
 
 	eventRecorder record.EventRecorder
@@ -120,15 +117,17 @@ func NewCRDController(
 	allowedRoles []string,
 	logger *zap.Logger,
 ) (*CRDController, error) {
-	dialer := taloskubernetes.NewDialer()
-	kubeconfig.Dial = dialer.DialContext
-
-	kubeCli, err := kubernetes.NewForConfig(kubeconfig)
+	httpClient, err := rest.HTTPClientFor(kubeconfig)
 	if err != nil {
 		return nil, err
 	}
 
-	dynCli, err := dynamic.NewForConfig(kubeconfig)
+	kubeCli, err := kubernetes.NewForConfigAndClient(kubeconfig, httpClient)
+	if err != nil {
+		return nil, err
+	}
+
+	dynCli, err := dynamic.NewForConfigAndClient(kubeconfig, httpClient)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +158,7 @@ func NewCRDController(
 		kubeInformerFactory:    kubeInformerFactory,
 		kubeClient:             kubeCli,
 		dynamicClient:          dynCli,
-		dialer:                 dialer,
+		httpClient:             httpClient,
 		dynamicLister:          lister,
 		queue: workqueue.NewTypedRateLimitingQueue(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
@@ -168,7 +167,6 @@ func NewCRDController(
 		secretsSynced:  secrets.Informer().HasSynced,
 		talosSAsSynced: informer.HasSynced,
 		eventRecorder:  recorder,
-		secretsLister:  secrets.Lister(),
 	}
 
 	if _, err = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -206,7 +204,7 @@ func (t *CRDController) Run(ctx context.Context, workers int) error {
 
 	defer func() {
 		t.queue.ShutDown()
-		t.dialer.CloseAll()
+		t.httpClient.CloseIdleConnections()
 
 		wg.Wait()
 		t.logger.Debug("all workers have shut down")
@@ -300,7 +298,11 @@ func (t *CRDController) syncHandler(ctx context.Context, key string) error {
 		return err
 	}
 
-	secret, err := t.secretsLister.Secrets(namespace).Get(name)
+	// Read the secret from the live API, not the informer cache: a stale-positive
+	// cache (e.g. right after a controller restart that re-lists, before a delete is
+	// reflected) would make the controller take the no-op path below and emit "Synced"
+	// while the secret is actually absent from the API.
+	secret, err := t.kubeClient.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
 
 	secretNotFound := kubeerrors.IsNotFound(err)
 	if err != nil && !secretNotFound {
@@ -386,7 +388,10 @@ func (t *CRDController) syncHandler(ctx context.Context, key string) error {
 		}
 
 		_, err = t.kubeClient.CoreV1().Secrets(namespace).Create(ctx, newSecret, metav1.CreateOptions{})
-		if err != nil {
+		// tolerate a lost create race: if the secret already exists, it is durably
+		// present, which is all "Synced" needs to guarantee; content is reconciled on
+		// the next resync via needsUpdate.
+		if err != nil && !kubeerrors.IsAlreadyExists(err) {
 			return err
 		}
 	} else if t.needsUpdate(secret, desiredRoleSet.Strings()) {

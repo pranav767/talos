@@ -9,17 +9,26 @@ package api
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
 	"github.com/siderolabs/go-retry/retry"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/siderolabs/talos/internal/integration/base"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
+	"github.com/siderolabs/talos/pkg/machinery/cel"
+	"github.com/siderolabs/talos/pkg/machinery/cel/celenv"
 	"github.com/siderolabs/talos/pkg/machinery/client"
+	"github.com/siderolabs/talos/pkg/machinery/client/multiplex"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
+	blockcfg "github.com/siderolabs/talos/pkg/machinery/config/types/block"
+	"github.com/siderolabs/talos/pkg/machinery/constants"
+	"github.com/siderolabs/talos/pkg/machinery/resources/block"
 )
 
 // RebootSuite ...
@@ -52,14 +61,17 @@ func (suite *RebootSuite) TearDownTest() {
 	}
 }
 
-// TestRebootNodeByNode reboots cluster node by node, waiting for health between reboots.
-func (suite *RebootSuite) TestRebootNodeByNode() {
+// TestRebootDefault reboots cluster node by node, waiting for health between reboots.
+func (suite *RebootSuite) TestRebootDefault() {
 	if !suite.Capabilities().SupportsReboot {
 		suite.T().Skip("cluster doesn't support reboots")
 	}
 
-	nodes := suite.DiscoverNodeInternalIPs(suite.ctx)
-	suite.Require().NotEmpty(nodes)
+	// test with a single controlplane and a single worker node
+	nodes := []string{
+		suite.RandomDiscoveredNodeInternalIP(machine.TypeControlPlane),
+		suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker),
+	}
 
 	for _, node := range nodes {
 		suite.T().Log("rebooting node", node)
@@ -80,8 +92,11 @@ func (suite *RebootSuite) TestForcedReboot() { //nolint:gocyclo
 		suite.T().Skip("cluster doesn't support reboots")
 	}
 
-	nodes := suite.DiscoverNodeInternalIPs(suite.ctx)
-	suite.Require().NotEmpty(nodes)
+	// test with a single controlplane and a single worker node
+	nodes := []string{
+		suite.RandomDiscoveredNodeInternalIP(machine.TypeControlPlane),
+		suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker),
+	}
 
 	for _, node := range nodes {
 		suite.T().Log("force rebooting node", node)
@@ -138,15 +153,15 @@ func (suite *RebootSuite) TestForcedReboot() { //nolint:gocyclo
 	suite.WaitForBootDone(suite.ctx)
 }
 
-// TestRebootMultiple reboots a node, issues consequent reboots
+// TestRebootMultipleTimes reboots a node, issues consequent reboots
 // reboot should cancel boot sequence, and cancel another reboot.
-func (suite *RebootSuite) TestRebootMultiple() {
+func (suite *RebootSuite) TestRebootMultipleTimes() {
 	if !suite.Capabilities().SupportsReboot {
 		suite.T().Skip("cluster doesn't support reboots")
 	}
 
 	node := suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker)
-	nodeCtx := client.WithNodes(suite.ctx, node)
+	nodeCtx := client.WithNode(suite.ctx, node)
 
 	bootID := suite.ReadBootIDWithRetry(nodeCtx, time.Minute*5)
 
@@ -201,7 +216,7 @@ func (suite *RebootSuite) TestRebootAllNodes() {
 	for _, node := range nodes {
 		go func(node string) {
 			errCh <- func() error {
-				nodeCtx := client.WithNodes(suite.ctx, node)
+				nodeCtx := client.WithNode(suite.ctx, node)
 
 				// read boot_id before reboot
 				bootIDBefore, err := suite.ReadBootID(nodeCtx)
@@ -220,11 +235,13 @@ func (suite *RebootSuite) TestRebootAllNodes() {
 		suite.Require().NoError(<-errCh)
 	}
 
-	allNodesCtx := client.WithNodes(suite.ctx, nodes...)
+	respCh := multiplex.Unary(suite.ctx, nodes, func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, base.IgnoreGRPCUnavailable(suite.Client.Reboot(ctx))
+	})
 
-	err := base.IgnoreGRPCUnavailable(suite.Client.Reboot(allNodesCtx))
-
-	suite.Require().NoError(err)
+	for resp := range respCh {
+		suite.Require().NoError(resp.Err, "error sending reboot command to node %q", resp.Node)
+	}
 
 	for _, node := range nodes {
 		go func(node string) {
@@ -236,7 +253,7 @@ func (suite *RebootSuite) TestRebootAllNodes() {
 
 				bootIDBefore := bootIDBeforeInterface.(string) //nolint:forcetypeassert
 
-				nodeCtx := client.WithNodes(suite.ctx, node)
+				nodeCtx := client.WithNode(suite.ctx, node)
 
 				return retry.Constant(10 * time.Minute).Retry(
 					func() error {
@@ -270,11 +287,61 @@ func (suite *RebootSuite) TestRebootAllNodes() {
 		suite.Assert().NoError(<-errCh)
 	}
 
+	suite.ClearConnectionRefused(suite.ctx, nodes...)
+
 	if suite.Cluster != nil {
 		// without cluster state we can't do deep checks, but basic reboot test still works
 		// NB: using `ctx` here to have client talking to init node by default
 		suite.AssertClusterHealthy(suite.ctx)
 	}
+}
+
+// TestRebootWithFailingUserVolume verifies that a user volume whose allocation fails
+// (it references a disk that does not exist) does not block the reboot sequence.
+//
+// The reboot sequence tears down the volume lifecycle; a failing user volume that is
+// never provisioned must not hold that teardown up, otherwise the node fails to reboot.
+func (suite *RebootSuite) TestRebootWithFailingUserVolume() {
+	if !suite.Capabilities().SupportsReboot {
+		suite.T().Skip("cluster doesn't support reboots")
+	}
+
+	node := suite.RandomDiscoveredNodeInternalIP(machine.TypeWorker)
+	nodeCtx := client.WithNode(suite.ctx, node)
+
+	volumeID := fmt.Sprintf("badvol%04x", rand.Int31())
+	userVolumeID := constants.UserVolumePrefix + volumeID
+
+	suite.T().Logf("creating a failing user volume %q on node %s", volumeID, node)
+
+	doc := blockcfg.NewUserVolumeConfigV1Alpha1()
+	doc.MetaName = volumeID
+	// selector references a disk that does not exist, so the volume can never be allocated
+	doc.ProvisioningSpec.DiskSelectorSpec.Match = cel.MustExpression(
+		cel.ParseBooleanExpression(`disk.dev_path == "/dev/does-not-exist"`, celenv.DiskLocator()),
+	)
+	doc.ProvisioningSpec.ProvisioningMinSize = blockcfg.MustByteSize("100MiB")
+	doc.ProvisioningSpec.ProvisioningMaxSize = blockcfg.MustSize("1GiB")
+
+	suite.PatchMachineConfig(nodeCtx, doc)
+	defer suite.RemoveMachineConfigDocumentsByName(nodeCtx, blockcfg.UserVolumeConfigKind, volumeID)
+
+	// the user volume should fail to allocate (no disk matched the selector)
+	rtestutils.AssertResources(nodeCtx, suite.T(), suite.Client.COSI, []string{userVolumeID},
+		func(vs *block.VolumeStatus, asrt *assert.Assertions) {
+			asrt.Equal(block.VolumePhaseFailed, vs.TypedSpec().Phase)
+		},
+	)
+
+	// reboot must complete despite the failing user volume
+	suite.AssertRebooted(
+		suite.ctx, node, func(nodeCtx context.Context) error {
+			return base.IgnoreGRPCUnavailable(suite.Client.Reboot(nodeCtx))
+		}, 10*time.Minute,
+		suite.CleanupFailedPods,
+	)
+
+	suite.WaitForBootDone(suite.ctx)
 }
 
 func init() {

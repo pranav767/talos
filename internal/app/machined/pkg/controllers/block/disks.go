@@ -258,6 +258,8 @@ func (ctrl *DisksController) analyzeBlockDevice(
 			d.TypedSpec().Symlinks = nil
 		}
 
+		d.TypedSpec().FirmwareVersion = props.FirmwareRevision
+
 		return nil
 	})
 }
@@ -284,7 +286,7 @@ func serialFromUdevdHelpers(ctx context.Context, id, transport string) string {
 }
 
 func runUdevdHelper(ctx context.Context, helper string, args ...string) string {
-	out, err := cmd.RunContext(ctx, helper, args...)
+	out, err := cmd.RunWithOptions(ctx, helper, args)
 	if err != nil {
 		return ""
 	}

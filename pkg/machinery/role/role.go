@@ -32,6 +32,12 @@ const (
 	// EtcdBackup defines Talos role that allows making etcd backups.
 	EtcdBackup = Role(Prefix + "etcd:backup")
 
+	// ImageVerifier defines Talos role that allows verifying images.
+	ImageVerifier = Role(Prefix + "image:verifier")
+
+	// MetaWriter defines Talos role that allows mutating META values (write and delete).
+	MetaWriter = Role(Prefix + "meta:writer")
+
 	// Impersonator defines Talos role for impersonating another user (and their role).
 	// Used internally, but may also be granted to the user.
 	Impersonator = Role(Prefix + "impersonator")
@@ -44,7 +50,7 @@ type Set struct {
 
 var (
 	// All roles that can be granted to users.
-	All = MakeSet(Admin, Operator, Reader, EtcdBackup, Impersonator)
+	All = MakeSet(Admin, Operator, Reader, EtcdBackup, ImageVerifier, MetaWriter, Impersonator)
 
 	// Zero is an empty set of roles.
 	Zero = MakeSet()
@@ -116,4 +122,17 @@ func (s Set) Includes(role Role) bool {
 	_, ok := s.roles[role]
 
 	return ok
+}
+
+// Intersect returns a new set which is an intersection of two sets.
+func (s Set) Intersect(other Set) Set {
+	res := MakeSet()
+
+	for r := range s.roles {
+		if _, ok := other.roles[r]; ok {
+			res.roles[r] = struct{}{}
+		}
+	}
+
+	return res
 }

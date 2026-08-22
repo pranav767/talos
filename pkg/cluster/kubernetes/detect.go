@@ -12,6 +12,8 @@ import (
 
 	"github.com/blang/semver/v4"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/siderolabs/talos/pkg/kubernetes"
 )
 
 // DetectLowestVersion returns lowest Kubernetes components versions in the cluster.
@@ -48,12 +50,12 @@ func DetectLowestVersion(ctx context.Context, cluster UpgradeProvider, options U
 				continue
 			}
 
-			idx := strings.LastIndex(container.Image, ":")
-			if idx == -1 {
+			imageTag, ok := kubernetes.VersionFromImageRef(container.Image)
+			if !ok {
 				continue
 			}
 
-			v, err := semver.ParseTolerant(strings.TrimLeft(container.Image[idx+1:], "v"))
+			v, err := semver.ParseTolerant(strings.TrimLeft(imageTag, "v"))
 			if err != nil {
 				options.Log("failed to parse %s container version %s", app, err)
 

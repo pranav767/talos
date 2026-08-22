@@ -22,6 +22,7 @@ import (
 	"github.com/cosi-project/runtime/pkg/safe"
 	"github.com/cosi-project/runtime/pkg/state"
 	"github.com/siderolabs/gen/maps"
+	"github.com/siderolabs/gen/xslices"
 	yaml "go.yaml.in/yaml/v4"
 
 	networkadapter "github.com/siderolabs/talos/internal/app/machined/pkg/adapters/network"
@@ -101,7 +102,7 @@ type Ethernet struct {
 		OnLink bool   `yaml:"on-link,omitempty"`
 	} `yaml:"routes,omitempty"`
 	RoutingPolicy []struct { // TODO
-		From  string `yaml:"froom,omitempty"`
+		From  string `yaml:"from,omitempty"`
 		Table uint32 `yaml:"table,omitempty"`
 	} `yaml:"routing-policy,omitempty"`
 }
@@ -181,7 +182,8 @@ func (n *Nocloud) configFromNetwork(ctx context.Context, metaBaseURL string, r s
 
 //nolint:gocyclo
 func (n *Nocloud) configFromCD(ctx context.Context, r state.State) (metaConfig []byte, networkConfig []byte, machineConfig []byte, err error) {
-	err = blockutils.ReadFromVolume(ctx, r,
+	err = blockutils.ReadFromVolume(
+		ctx, r,
 		[]string{strings.ToLower(configISOLabel), strings.ToUpper(configISOLabel)},
 		func(root xfs.Root, volumeStatus *block.VolumeStatus) error {
 			log.Printf("found config disk (cidata) at %s", volumeStatus.TypedSpec().Location)
@@ -351,7 +353,8 @@ func (n *Nocloud) applyNetworkConfigV1(ctx context.Context, config *NetworkConfi
 					ipPrefix = netip.PrefixFrom(ip, ones)
 				}
 
-				networkConfig.Addresses = append(networkConfig.Addresses,
+				networkConfig.Addresses = append(
+					networkConfig.Addresses,
 					network.AddressSpecSpec{
 						ConfigLayer: network.ConfigPlatform,
 						LinkName:    name,
@@ -425,10 +428,18 @@ func (n *Nocloud) applyNetworkConfigV1(ctx context.Context, config *NetworkConfi
 				}
 			}
 
-			networkConfig.Resolvers = append(networkConfig.Resolvers, network.ResolverSpecSpec{
-				DNSServers:  dnsIPs,
+			resolverSpec := network.ResolverSpecSpec{
+				NameServers: xslices.Map(dnsIPs, func(addr netip.Addr) network.NameServerSpec {
+					return network.NameServerSpec{
+						Addr:     addr,
+						Protocol: nethelpers.DNSProtocolDefault,
+					}
+				}),
 				ConfigLayer: network.ConfigPlatform,
-			})
+			}
+			resolverSpec.Convert()
+
+			networkConfig.Resolvers = append(networkConfig.Resolvers, resolverSpec)
 		case "bond":
 			name := ntwrk.Interfaces
 
@@ -465,7 +476,7 @@ func (n *Nocloud) applyNetworkConfigV1(ctx context.Context, config *NetworkConfi
 			}
 
 			if mode == nethelpers.BondMode8023AD {
-				bondLink.BondMaster.ADLACPActive = nethelpers.ADLACPActiveOn
+				bondLink.BondMaster.ADLACPActive = new(nethelpers.ADLACPActiveOn)
 			}
 
 			if ntwrk.MTU != 0 {
@@ -626,7 +637,8 @@ func applyNetworkConfigV2Ethernet(name string, eth Ethernet, networkConfig *runt
 			family = nethelpers.FamilyInet6
 		}
 
-		networkConfig.Addresses = append(networkConfig.Addresses,
+		networkConfig.Addresses = append(
+			networkConfig.Addresses,
 			network.AddressSpecSpec{
 				ConfigLayer: network.ConfigPlatform,
 				LinkName:    name,
@@ -733,17 +745,10 @@ func applyNetworkConfigV2Ethernet(name string, eth Ethernet, networkConfig *runt
 
 		networkConfig.Routes = append(networkConfig.Routes, routeSpec)
 
-		if route.OnLink && gw.Is4() {
-			// This assumes an interface with multiple routes will never have multiple statically set ips.
-			ipPrefix, err := netip.ParsePrefix(eth.Address[0])
-			if err != nil {
-				return fmt.Errorf("failed to parse route source: %w", err)
-			}
-
+		if route.OnLink {
 			routeSpec := network.RouteSpecSpec{
 				ConfigLayer: network.ConfigPlatform,
 				Destination: netip.PrefixFrom(gw, gw.BitLen()),
-				Source:      ipPrefix.Addr(),
 				OutLinkName: name,
 				Scope:       nethelpers.ScopeLink,
 				Table:       withDefault(nethelpers.RoutingTable(route.Table), nethelpers.TableMain),
@@ -751,6 +756,10 @@ func applyNetworkConfigV2Ethernet(name string, eth Ethernet, networkConfig *runt
 				Type:        nethelpers.TypeUnicast,
 				Family:      nethelpers.FamilyInet4,
 				Priority:    withDefault(route.Metric, network.DefaultRouteMetric),
+			}
+
+			if gw.Is6() {
+				routeSpec.Family = nethelpers.FamilyInet6
 			}
 
 			networkConfig.Routes = append(networkConfig.Routes, routeSpec)
@@ -875,7 +884,7 @@ func (n *Nocloud) applyNetworkConfigV2(ctx context.Context, config *NetworkConfi
 		}
 
 		if mode == nethelpers.BondMode8023AD {
-			bondLink.BondMaster.ADLACPActive = nethelpers.ADLACPActiveOn
+			bondLink.BondMaster.ADLACPActive = new(nethelpers.ADLACPActiveOn)
 		}
 
 		networkadapter.BondMasterSpec(&bondLink.BondMaster).FillDefaults()
@@ -917,10 +926,18 @@ func (n *Nocloud) applyNetworkConfigV2(ctx context.Context, config *NetworkConfi
 	}
 
 	if len(dnsIPs) > 0 {
-		networkConfig.Resolvers = append(networkConfig.Resolvers, network.ResolverSpecSpec{
-			DNSServers:  dnsIPs,
+		resolverSpec := network.ResolverSpecSpec{
+			NameServers: xslices.Map(dnsIPs, func(addr netip.Addr) network.NameServerSpec {
+				return network.NameServerSpec{
+					Addr:     addr,
+					Protocol: nethelpers.DNSProtocolDefault,
+				}
+			}),
 			ConfigLayer: network.ConfigPlatform,
-		})
+		}
+		resolverSpec.Convert()
+
+		networkConfig.Resolvers = append(networkConfig.Resolvers, resolverSpec)
 	}
 
 	return needsReconcile, nil

@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -27,26 +26,26 @@ func TestLinkConfigMarshalStability(t *testing.T) {
 
 	cfg := network.NewLinkConfigV1Alpha1("enp0s1")
 	cfg.LinkMTU = 9000
-	cfg.LinkUp = pointer.To(true)
+	cfg.LinkUp = new(true)
 	cfg.LinkAddresses = []network.AddressConfig{
 		{
 			AddressAddress: netip.MustParsePrefix("192.168.1.100/24"),
 		},
 		{
 			AddressAddress:  netip.MustParsePrefix("2001:db8::1/64"),
-			AddressPriority: pointer.To[uint32](100),
+			AddressPriority: new(uint32(100)),
 		},
 	}
 	cfg.LinkRoutes = []network.RouteConfig{
 		{
-			RouteDestination: network.Prefix{netip.MustParsePrefix("10.3.5.0/24")},
-			RouteGateway:     network.Addr{netip.MustParseAddr("10.3.5.1")},
+			RouteDestination: meta.Prefix{Prefix: netip.MustParsePrefix("10.3.5.0/24")},
+			RouteGateway:     meta.Addr{Addr: netip.MustParseAddr("10.3.5.1")},
 		},
 		{
-			RouteGateway: network.Addr{netip.MustParseAddr("fe80::1")},
+			RouteGateway: meta.Addr{Addr: netip.MustParseAddr("fe80::1")},
 		},
 	}
-	cfg.LinkMulticast = pointer.To(true)
+	cfg.LinkMulticast = new(true)
 
 	marshaled, err := encoder.NewEncoder(cfg, encoder.WithComments(encoder.CommentsDisabled)).Encode()
 	require.NoError(t, err)
@@ -73,26 +72,26 @@ func TestLinkConfigUnmarshal(t *testing.T) {
 		MetaName: "enp0s1",
 		CommonLinkConfig: network.CommonLinkConfig{
 			LinkMTU: 9000,
-			LinkUp:  pointer.To(true),
+			LinkUp:  new(true),
 			LinkAddresses: []network.AddressConfig{
 				{
 					AddressAddress: netip.MustParsePrefix("192.168.1.100/24"),
 				},
 				{
 					AddressAddress:  netip.MustParsePrefix("2001:db8::1/64"),
-					AddressPriority: pointer.To[uint32](100),
+					AddressPriority: new(uint32(100)),
 				},
 			},
 			LinkRoutes: []network.RouteConfig{
 				{
-					RouteDestination: network.Prefix{netip.MustParsePrefix("10.3.5.0/24")},
-					RouteGateway:     network.Addr{netip.MustParseAddr("10.3.5.1")},
+					RouteDestination: meta.Prefix{Prefix: netip.MustParsePrefix("10.3.5.0/24")},
+					RouteGateway:     meta.Addr{Addr: netip.MustParseAddr("10.3.5.1")},
 				},
 				{
-					RouteGateway: network.Addr{netip.MustParseAddr("fe80::1")},
+					RouteGateway: meta.Addr{Addr: netip.MustParseAddr("fe80::1")},
 				},
 			},
-			LinkMulticast: pointer.To(true),
+			LinkMulticast: new(true),
 		},
 	}, docs[0])
 }
@@ -139,7 +138,7 @@ func TestLinkValidate(t *testing.T) {
 			cfg: func() *network.LinkConfigV1Alpha1 {
 				cfg := network.NewLinkConfigV1Alpha1("enp0s2")
 				cfg.LinkMTU = 9000
-				cfg.LinkUp = pointer.To(true)
+				cfg.LinkUp = new(true)
 				cfg.LinkAddresses = []network.AddressConfig{
 					{
 						AddressAddress: netip.MustParsePrefix("192.168.1.100/24"),
@@ -150,11 +149,11 @@ func TestLinkValidate(t *testing.T) {
 				}
 				cfg.LinkRoutes = []network.RouteConfig{
 					{
-						RouteDestination: network.Prefix{netip.MustParsePrefix("10.3.5.0/24")},
-						RouteGateway:     network.Addr{netip.MustParseAddr("10.3.5.1")},
+						RouteDestination: meta.Prefix{Prefix: netip.MustParsePrefix("10.3.5.0/24")},
+						RouteGateway:     meta.Addr{Addr: netip.MustParseAddr("10.3.5.1")},
 					},
 					{
-						RouteGateway: network.Addr{netip.MustParseAddr("fe80::1")},
+						RouteGateway: meta.Addr{Addr: netip.MustParseAddr("fe80::1")},
 					},
 				}
 

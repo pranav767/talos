@@ -9,7 +9,6 @@ import (
 	"net/netip"
 
 	"github.com/mdlayher/netlink"
-	"github.com/siderolabs/go-pointer"
 	"golang.org/x/sys/unix"
 
 	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
@@ -18,7 +17,7 @@ import (
 
 // BondMasterSpec adapter provides encoding/decoding to netlink structures.
 //
-//nolint:revive,golint
+//nolint:revive
 func BondMasterSpec(r *network.BondMasterSpec) bondMaster {
 	return bondMaster{
 		BondMasterSpec: r,
@@ -66,10 +65,6 @@ func (a bondMaster) FillDefaults() {
 			bond.MissedMax = 2
 		}
 	}
-
-	if bond.Mode != nethelpers.BondMode8023AD {
-		bond.ADLACPActive = nethelpers.ADLACPActiveOn
-	}
 }
 
 // Encode the BondMasterSpec into netlink attributes.
@@ -85,7 +80,10 @@ func (a bondMaster) Encode() ([]byte, error) {
 
 	if bond.Mode == nethelpers.BondMode8023AD {
 		encoder.Uint8(unix.IFLA_BOND_AD_LACP_RATE, uint8(bond.LACPRate))
-		encoder.Uint8(unix.IFLA_BOND_AD_LACP_ACTIVE, uint8(bond.ADLACPActive))
+
+		if bond.ADLACPActive != nil {
+			encoder.Uint8(unix.IFLA_BOND_AD_LACP_ACTIVE, uint8(*bond.ADLACPActive))
+		}
 	}
 
 	if bond.Mode != nethelpers.BondMode8023AD && bond.Mode != nethelpers.BondModeALB && bond.Mode != nethelpers.BondModeTLB {
@@ -184,6 +182,7 @@ func (a bondMaster) Encode() ([]byte, error) {
 //
 //nolint:gocyclo,cyclop
 func (a bondMaster) Decode(data []byte) error {
+	*a.BondMasterSpec = network.BondMasterSpec{}
 	bond := a.BondMasterSpec
 
 	decoder, err := netlink.NewAttributeDecoder(data)
@@ -204,7 +203,7 @@ func (a bondMaster) Decode(data []byte) error {
 		case unix.IFLA_BOND_ARP_ALL_TARGETS:
 			bond.ARPAllTargets = nethelpers.ARPAllTargets(decoder.Uint32())
 		case unix.IFLA_BOND_PRIMARY:
-			bond.PrimaryIndex = pointer.To(decoder.Uint32())
+			bond.PrimaryIndex = new(decoder.Uint32())
 		case unix.IFLA_BOND_PRIMARY_RESELECT:
 			bond.PrimaryReselect = nethelpers.PrimaryReselect(decoder.Uint8())
 		case unix.IFLA_BOND_FAIL_OVER_MAC:
@@ -270,7 +269,7 @@ func (a bondMaster) Decode(data []byte) error {
 		case unix.IFLA_BOND_PEER_NOTIF_DELAY:
 			bond.PeerNotifyDelay = decoder.Uint32()
 		case unix.IFLA_BOND_AD_LACP_ACTIVE:
-			bond.ADLACPActive = nethelpers.ADLACPActive(decoder.Uint8())
+			bond.ADLACPActive = new(nethelpers.ADLACPActive(decoder.Uint8()))
 		case unix.IFLA_BOND_MISSED_MAX:
 			bond.MissedMax = decoder.Uint8()
 		}

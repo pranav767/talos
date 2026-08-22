@@ -5,14 +5,15 @@
 package config
 
 import (
+	"io/fs"
 	"iter"
 	"maps"
 	"net/url"
 	"time"
 
-	"github.com/siderolabs/gen/optional"
-
 	"github.com/siderolabs/talos/pkg/machinery/cel"
+	"github.com/siderolabs/talos/pkg/machinery/cel/celenv"
+	"github.com/siderolabs/talos/pkg/machinery/constants"
 )
 
 // RuntimeConfig defines the interface to access Talos runtime configuration.
@@ -25,6 +26,13 @@ type RuntimeConfig interface {
 // EnvironmentConfig defines the interface to access Talos environment configuration.
 type EnvironmentConfig interface {
 	Variables() map[string]string
+}
+
+// EtcFileConfig defines the interface to access user-managed /etc file configuration.
+type EtcFileConfig interface {
+	Name() string
+	Content() string
+	Mode() fs.FileMode
 }
 
 // WrapEnvironmentConfigList wraps a list of EnvironmentConfig into a single EnvironmentConfig aggregating the results.
@@ -40,10 +48,58 @@ func (w environmentConfigWrapper) Variables() map[string]string {
 	})
 }
 
+// SysctlConfig defines the interface to access Talos sysctl configuration.
+type SysctlConfig interface {
+	Sysctls() map[string]string
+}
+
+// WrapSysctlConfigList merges a list of SysctlConfig into a single map,
+// with later entries taking precedence on key conflicts.
+func WrapSysctlConfigList(configs ...SysctlConfig) map[string]string {
+	return mergeMaps(configs, func(c SysctlConfig) iter.Seq2[string, string] {
+		return maps.All(c.Sysctls())
+	})
+}
+
+// SysfsConfig defines the interface to access Talos sysfs configuration.
+type SysfsConfig interface {
+	Sysfs() map[string]string
+}
+
+// WrapSysfsConfigList merges a list of SysfsConfig into a single map,
+// with later entries taking precedence on key conflicts.
+func WrapSysfsConfigList(configs ...SysfsConfig) map[string]string {
+	return mergeMaps(configs, func(c SysfsConfig) iter.Seq2[string, string] {
+		return maps.All(c.Sysfs())
+	})
+}
+
+// KernelModuleConfig defines the interface to access a Talos kernel module to load.
+type KernelModuleConfig interface {
+	Name() string
+	Parameters() []string
+}
+
+// UnattendedInstallConfig defines the interface to access Talos unattended install configuration.
+type UnattendedInstallConfig interface {
+	UnattendedInstallConfigSignal()
+	InstallerImage() string
+	VolumeSelector() cel.Expression
+	VolumeWipe() bool
+	RebootAfterInstall() *bool
+}
+
 // WatchdogTimerConfig defines the interface to access Talos watchdog timer configuration.
 type WatchdogTimerConfig interface {
 	Device() string
 	Timeout() time.Duration
+}
+
+// SecurityProfileConfig defines the interface to access Talos node security profile configuration.
+type SecurityProfileConfig interface {
+	SecurityProfileConfigSignal()
+	// WorkloadIsolation reports whether the container plane should run inside the sandbox namespace.
+	WorkloadIsolation() bool
 }
 
 // WrapRuntimeConfigList wraps a list of RuntimeConfig into a single RuntimeConfig aggregating the results.
@@ -73,7 +129,60 @@ func (w runtimeConfigWrapper) WatchdogTimer() WatchdogTimerConfig {
 
 // OOMConfig defines the interface to access OOM configuration.
 type OOMConfig interface {
-	TriggerExpression() optional.Optional[cel.Expression]
-	CgroupRankingExpression() optional.Optional[cel.Expression]
-	SampleInterval() optional.Optional[time.Duration]
+	TriggerExpression() cel.Expression
+	CgroupRankingExpression() cel.Expression
+	StrictCgroupClassOrdering() bool
+	SampleInterval() time.Duration
+}
+
+// DefaultOOMConfig provides default OOM configuration values.
+type DefaultOOMConfig struct{}
+
+// TriggerExpression implements OOMConfig interface, returning the default OOM trigger expression.
+func (DefaultOOMConfig) TriggerExpression() cel.Expression {
+	return cel.MustExpression(
+		cel.ParseBooleanExpression(
+			constants.DefaultOOMTriggerExpression,
+			celenv.OOMTrigger(),
+		),
+	)
+}
+
+// CgroupRankingExpression implements OOMConfig interface, returning the default cgroup ranking expression.
+//
+// Sort processes by the following hierarchy:
+// First, sort by high-level group:
+//
+//	kubepods (workloads)
+//	podruntime (CRI, kubelet, etcd)
+//	runtime (core containerd, system services)
+//	init
+//
+// Second, inside kubepods we have QoS groups:
+//
+//	first priority: BestEffort
+//	second: Burstable
+//	last: Guaranteed
+//
+// Third, look into other attributes, e.g. OOM score.
+// Fourth, look into memory max - memory current (if memory max is set).
+//
+// Sort to make the most prioritized to OOM-kill cgroup to the first place.
+func (DefaultOOMConfig) CgroupRankingExpression() cel.Expression {
+	return cel.MustExpression(
+		cel.ParseDoubleExpression(
+			constants.DefaultOOMCgroupRankingExpression,
+			celenv.OOMCgroupScoring(),
+		),
+	)
+}
+
+// StrictCgroupClassOrdering implements OOMConfig interface, returning the default value for strict cgroup class ordering.
+func (DefaultOOMConfig) StrictCgroupClassOrdering() bool {
+	return constants.DefaultOOMStrictCgroupClassOrdering
+}
+
+// SampleInterval implements OOMConfig interface, returning the default OOM sample interval.
+func (DefaultOOMConfig) SampleInterval() time.Duration {
+	return constants.DefaultOOMSampleInterval
 }

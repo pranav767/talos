@@ -5,13 +5,14 @@
 package block
 
 import (
+	"fmt"
 	"os"
+	"time"
 
 	"github.com/cosi-project/runtime/pkg/resource"
 	"github.com/cosi-project/runtime/pkg/resource/meta"
 	"github.com/cosi-project/runtime/pkg/resource/protobuf"
 	"github.com/cosi-project/runtime/pkg/resource/typed"
-	"github.com/siderolabs/go-pointer"
 
 	"github.com/siderolabs/talos/pkg/machinery/cel"
 	"github.com/siderolabs/talos/pkg/machinery/proto"
@@ -48,6 +49,16 @@ type VolumeConfigSpec struct {
 
 	// Symlink options for the volume.
 	Symlink SymlinkProvisioningSpec `yaml:"symlink,omitempty" protobuf:"7"`
+
+	// TrimEnabled indicates whether the volume should be trimmed (fstrim) on a schedule.
+	TrimEnabled bool `yaml:"trimEnabled,omitempty" protobuf:"8"`
+	// TrimInterval is the resolved interval at which the volume should be trimmed.
+	TrimInterval time.Duration `yaml:"trimInterval,omitempty" protobuf:"9"`
+
+	// ScrubEnabled indicates whether the volume filesystem should be scrubbed on a schedule.
+	ScrubEnabled bool `yaml:"scrubEnabled,omitempty" protobuf:"10"`
+	// ScrubInterval is the resolved period at which the volume filesystem should be scrubbed.
+	ScrubInterval time.Duration `yaml:"scrubInterval,omitempty" protobuf:"11"`
 }
 
 // Wave constants.
@@ -97,6 +108,9 @@ type PartitionSpec struct {
 	// Partition maximum size (relative), if not set, grows to the maximum size.
 	RelativeMaxSize uint64 `yaml:"relativeMaxSize" protobuf:"6"`
 
+	// NegativeMaxSize indicates that MaxSize or RelativeMaxSize represents space to be left free on the device rather than space to consume.
+	NegativeMaxSize bool `yaml:"negativeMaxSize" protobuf:"7"`
+
 	// Grow the partition automatically to the maximum size.
 	Grow bool `yaml:"grow" protobuf:"3"`
 
@@ -108,12 +122,25 @@ type PartitionSpec struct {
 }
 
 // ResolveMaxSize resolves the maximum size of the partition.
-func (ps *PartitionSpec) ResolveMaxSize(available uint64) uint64 {
+// Returns the maximum size of the partition and an error if the partition size cannot be resolved.
+func (ps *PartitionSpec) ResolveMaxSize(available uint64) (uint64, error) {
+	var size uint64
+
 	if ps.RelativeMaxSize != 0 {
-		return available * ps.RelativeMaxSize / 100
+		size = available * ps.RelativeMaxSize / 100
+	} else {
+		size = ps.MaxSize
 	}
 
-	return ps.MaxSize
+	if ps.NegativeMaxSize {
+		if size > available {
+			return 0, fmt.Errorf("partition size cannot be negative")
+		}
+
+		return available - size, nil
+	}
+
+	return size, nil
 }
 
 // LocatorSpec is the spec for volume locator.
@@ -134,18 +161,23 @@ type FilesystemSpec struct {
 	Type FilesystemType `yaml:"type" protobuf:"1"`
 	// Filesystem label.
 	Label string `yaml:"label,omitempty" protobuf:"2"`
+	// MinAllocationGroupSize is the minimum XFS allocation group size in bytes.
+	//
+	// Zero leaves the mkfs.xfs defaults alone.
+	MinAllocationGroupSize uint64 `yaml:"minAllocationGroupSize,omitempty" protobuf:"3"`
 }
 
 // EncryptionSpec is the spec for volume encryption.
 //
 //gotagsrewrite:gen
 type EncryptionSpec struct {
-	Provider    EncryptionProviderType `yaml:"provider" protobuf:"1"`
-	Keys        []EncryptionKey        `yaml:"keys" protobuf:"2"`
-	Cipher      string                 `yaml:"cipher,omitempty" protobuf:"3"`
-	KeySize     uint                   `yaml:"keySize,omitempty" protobuf:"4"`
-	BlockSize   uint64                 `yaml:"blockSize,omitempty" protobuf:"5"`
-	PerfOptions []string               `yaml:"perfOptions,omitempty" protobuf:"6"`
+	Provider      EncryptionProviderType `yaml:"provider" protobuf:"1"`
+	Keys          []EncryptionKey        `yaml:"keys" protobuf:"2"`
+	Cipher        string                 `yaml:"cipher,omitempty" protobuf:"3"`
+	KeySize       uint                   `yaml:"keySize,omitempty" protobuf:"4"`
+	BlockSize     uint64                 `yaml:"blockSize,omitempty" protobuf:"5"`
+	PerfOptions   []string               `yaml:"perfOptions,omitempty" protobuf:"6"`
+	AllowDiscards bool                   `yaml:"allowDiscards,omitempty" protobuf:"7"`
 }
 
 // EncryptionKey is the spec for volume encryption key.
@@ -206,7 +238,7 @@ func NewStringParameter(name, value string) ParameterSpec {
 	return ParameterSpec{
 		Type:   FSParameterTypeStringValue,
 		Name:   name,
-		String: pointer.To(value),
+		String: new(value),
 	}
 }
 
@@ -234,6 +266,10 @@ type MountSpec struct {
 	BindTarget *string `yaml:"bindTarget,omitempty" protobuf:"9"`
 	// Parameters are additional filesystem mount options used when mounting the volume.
 	Parameters []ParameterSpec `yaml:"parameters,omitempty" protobuf:"10"`
+	// Secure applies MOUNT_ATTR_NOSUID\|NODEV to the mount.
+	Secure bool `yaml:"secure,omitempty" protobuf:"11"`
+	// NoExec applies MOUNT_ATTR_NOEXEC to the mount.
+	NoExec bool `yaml:"noExec,omitempty" protobuf:"12"`
 }
 
 // SymlinkProvisioningSpec is the spec for volume symlink.

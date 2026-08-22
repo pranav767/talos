@@ -5,15 +5,11 @@
 package network_test
 
 import (
-	"context"
 	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/cosi-project/runtime/pkg/resource"
-	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
-	"github.com/cosi-project/runtime/pkg/state"
-	"github.com/siderolabs/gen/xslices"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 
@@ -105,6 +101,29 @@ func (suite *AddressMergeSuite) TestMerge() {
 	suite.assertNoAddress("eth0/10.0.0.35/32")
 }
 
+func (suite *AddressMergeSuite) TestMergeKernelManagedFlags() {
+	// kernel-managed flags should never make it into the final address spec
+	static := network.NewAddressSpec(network.ConfigNamespaceName, "configuration/eth0/10.0.0.35/32")
+	*static.TypedSpec() = network.AddressSpecSpec{
+		Address:     netip.MustParsePrefix("10.0.0.35/32"),
+		LinkName:    "eth0",
+		Family:      nethelpers.FamilyInet4,
+		Scope:       nethelpers.ScopeGlobal,
+		Flags:       nethelpers.AddressFlags(nethelpers.AddressPermanent | nethelpers.AddressTemporary | nethelpers.AddressTentative | nethelpers.AddressDADFailed),
+		ConfigLayer: network.ConfigMachineConfiguration,
+	}
+
+	suite.Create(static)
+
+	suite.assertAddresses(
+		[]string{
+			"eth0/10.0.0.35/32",
+		}, func(r *network.AddressSpec, asrt *assert.Assertions) {
+			asrt.Equal(nethelpers.AddressFlags(nethelpers.AddressPermanent), r.TypedSpec().Flags)
+		},
+	)
+}
+
 func (suite *AddressMergeSuite) TestMergeFlapping() {
 	// simulate two conflicting address definitions which are getting removed/added constantly
 	dhcp := network.NewAddressSpec(network.ConfigNamespaceName, "dhcp/eth0/10.0.0.1/8")
@@ -139,42 +158,4 @@ func TestAddressMergeSuite(t *testing.T) {
 			},
 		},
 	})
-}
-
-func assertResources[R rtestutils.ResourceWithRD](
-	ctx context.Context,
-	t *testing.T,
-	state state.State,
-	requiredIDs []string,
-	check func(R, *assert.Assertions),
-	opts ...rtestutils.Option,
-) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	rtestutils.AssertResources(
-		ctx,
-		t,
-		state,
-		xslices.Map(requiredIDs, func(id string) resource.ID { return id }),
-		check,
-		opts...,
-	)
-}
-
-func assertNoResource[R rtestutils.ResourceWithRD](
-	ctx context.Context,
-	t *testing.T,
-	state state.State,
-	id string,
-) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	rtestutils.AssertNoResource[R](
-		ctx,
-		t,
-		state,
-		id,
-	)
 }

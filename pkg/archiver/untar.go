@@ -13,15 +13,19 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pkg/xattr"
-
+	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"github.com/siderolabs/talos/pkg/safepath"
 )
 
 // Untar extracts .tar archive from r into filesystem under rootPath.
 //
-//nolint:gocyclo
-func Untar(ctx context.Context, r io.Reader, rootPath string) error {
+// If xattrsMap is not nil, it will be filled with paths and their corresponding
+// SELinux xattr values instead of setting the xattrs on the filesystem.
+//
+// If xattrsMap is nil, the function will ignore SELinux xattr values.
+//
+//nolint:gocyclo,cyclop
+func Untar(ctx context.Context, r io.Reader, rootPath string, xattrsMap map[string]string) error {
 	tr := tar.NewReader(r)
 
 	for {
@@ -52,7 +56,7 @@ func Untar(ctx context.Context, r io.Reader, rootPath string) error {
 			mode := hdr.FileInfo().Mode() & os.ModePerm
 			mode |= 0o700 // make rwx for the owner
 
-			if err = os.Mkdir(path, mode); err != nil && !os.IsExist(err) {
+			if err = os.MkdirAll(path, mode); err != nil && !os.IsExist(err) {
 				return fmt.Errorf("error creating directory %q mode %s: %w", path, mode, err)
 			}
 
@@ -61,12 +65,20 @@ func Untar(ctx context.Context, r io.Reader, rootPath string) error {
 			}
 
 		case tar.TypeSymlink:
+			if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return fmt.Errorf("error creating parent directory for symlink %q: %w", path, err)
+			}
+
 			if err = os.Symlink(hdr.Linkname, path); err != nil {
 				return fmt.Errorf("error creating symlink %q -> %q: %w", path, hdr.Linkname, err)
 			}
 
 		default:
 			mode := hdr.FileInfo().Mode()
+
+			if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return fmt.Errorf("error creating parent directory for file %q: %w", path, err)
+			}
 
 			fp, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, mode)
 			if err != nil {
@@ -87,10 +99,8 @@ func Untar(ctx context.Context, r io.Reader, rootPath string) error {
 			}
 		}
 
-		if hdr.PAXRecords["SCHILY.xattr.security.selinux"] != "" {
-			if err = xattr.LSet(path, "security.selinux", []byte(hdr.PAXRecords["SCHILY.xattr.security.selinux"])); err != nil {
-				return fmt.Errorf("error setting selinux xattr for %q: %w", path, err)
-			}
+		if hdr.PAXRecords[constants.TarPaxHeaderSELinux] != "" && xattrsMap != nil {
+			xattrsMap[path] = hdr.PAXRecords[constants.TarPaxHeaderSELinux]
 		}
 	}
 

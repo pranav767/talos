@@ -18,6 +18,7 @@ import (
 
 	"github.com/siderolabs/talos/internal/app/machined/pkg/runtime"
 	"github.com/siderolabs/talos/internal/pkg/dashboard/resourcedata"
+	"github.com/siderolabs/talos/internal/pkg/dashboard/utils"
 	"github.com/siderolabs/talos/pkg/machinery/meta"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
 	runtimeres "github.com/siderolabs/talos/pkg/machinery/resources/runtime"
@@ -28,6 +29,7 @@ const (
 	formItemDNSServers  = "DNS Servers"
 	formItemTimeServers = "Time Servers"
 	formItemInterface   = "Interface"
+	formItemVLANID      = "VLAN ID"
 	formItemMode        = "Mode"
 	formItemAddresses   = "Addresses"
 	formItemGateway     = "Gateway"
@@ -51,6 +53,7 @@ type NetworkConfigGrid struct {
 	dnsServersField   *tview.InputField
 	timeServersField  *tview.InputField
 	interfaceDropdown *tview.DropDown
+	vlanIDField       *tview.InputField
 	modeDropdown      *tview.DropDown
 	addressesField    *tview.InputField
 	gatewayField      *tview.InputField
@@ -119,6 +122,9 @@ func NewNetworkConfigGrid(ctx context.Context, dashboard *Dashboard) *NetworkCon
 		tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tview.Styles.PrimaryTextColor),
 	)
 
+	widget.vlanIDField = tview.NewInputField().SetLabel(formItemVLANID).SetAcceptanceFunc(tview.InputFieldInteger)
+	widget.vlanIDField.SetBlurFunc(widget.formEdited)
+
 	widget.modeDropdown = tview.NewDropDown().SetLabel(formItemMode)
 	widget.modeDropdown.SetBlurFunc(widget.formEdited)
 	widget.modeDropdown.SetOptions([]string{ModeDHCP, ModeStatic}, func(_ string, _ int) {
@@ -139,6 +145,7 @@ func NewNetworkConfigGrid(ctx context.Context, dashboard *Dashboard) *NetworkCon
 	widget.configForm.AddFormItem(widget.dnsServersField)
 	widget.configForm.AddFormItem(widget.timeServersField)
 	widget.configForm.AddFormItem(widget.interfaceDropdown)
+	widget.configForm.AddFormItem(widget.vlanIDField)
 	widget.configForm.AddFormItem(widget.modeDropdown)
 	widget.configForm.AddFormItem(widget.addressesField)
 	widget.configForm.AddFormItem(widget.gatewayField)
@@ -212,6 +219,10 @@ func (widget *NetworkConfigGrid) formEdited() {
 
 	ifaceSelected := currentInterface != "" && currentInterface != interfaceNone
 	if ifaceSelected {
+		if itemIndex := widget.configForm.GetFormItemIndex(formItemVLANID); itemIndex == -1 {
+			widget.configForm.AddFormItem(widget.vlanIDField)
+		}
+
 		if itemIndex := widget.configForm.GetFormItemIndex(formItemMode); itemIndex == -1 {
 			widget.configForm.AddFormItem(widget.modeDropdown)
 		}
@@ -239,8 +250,13 @@ func (widget *NetworkConfigGrid) formEdited() {
 		}
 	} else {
 		resetDropdown(widget.modeDropdown)
+		resetInputField(widget.vlanIDField)
 		resetInputField(widget.addressesField)
 		resetInputField(widget.gatewayField)
+
+		if itemIndex := widget.configForm.GetFormItemIndex(formItemVLANID); itemIndex != -1 {
+			widget.configForm.RemoveFormItem(itemIndex)
+		}
 
 		if itemIndex := widget.configForm.GetFormItemIndex(formItemMode); itemIndex != -1 {
 			widget.configForm.RemoveFormItem(itemIndex)
@@ -263,6 +279,7 @@ func (widget *NetworkConfigGrid) formEdited() {
 		DNSServers:  widget.dnsServersField.GetText(),
 		TimeServers: widget.timeServersField.GetText(),
 		Iface:       currentInterface,
+		VLANID:      widget.vlanIDField.GetText(),
 		Mode:        currentMode,
 		Addresses:   widget.addressesField.GetText(),
 		Gateway:     widget.gatewayField.GetText(),
@@ -321,6 +338,7 @@ func (widget *NetworkConfigGrid) clearForm() {
 	widget.dnsServersField.SetText("")
 	widget.timeServersField.SetText("")
 	widget.interfaceDropdown.SetCurrentOption(0)
+	widget.vlanIDField.SetText("")
 	widget.modeDropdown.SetCurrentOption(0)
 	widget.addressesField.SetText("")
 	widget.gatewayField.SetText("")
@@ -418,7 +436,7 @@ func (widget *NetworkConfigGrid) save(ctx context.Context) {
 		return
 	}
 
-	ctx = nodeContext(ctx, widget.selectedNode)
+	ctx = utils.NodeContext(ctx, widget.selectedNode)
 
 	if err = widget.dashboard.cli.MetaWrite(ctx, meta.MetalNetworkPlatformConfig, configBytes); err != nil {
 		widget.infoView.SetText(fmt.Sprintf("[red]Error: %v[-]", err))

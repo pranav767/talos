@@ -20,6 +20,9 @@ const SchedulerConfigType = resource.Type("SchedulerConfigs.kubernetes.talos.dev
 // SchedulerConfigID is a singleton resource ID for SchedulerConfig.
 const SchedulerConfigID = resource.ID(SchedulerID)
 
+// FinalSchedulerConfigID is the ID for the final kube-scheduler configuration, which is produced by merging user-provided configuration with defaults.
+const FinalSchedulerConfigID = resource.ID(FinalPrefix + SchedulerID)
+
 // SchedulerConfig represents configuration for kube-scheduler.
 type SchedulerConfig = typed.Resource[SchedulerConfigSpec, SchedulerConfigExtension]
 
@@ -27,20 +30,22 @@ type SchedulerConfig = typed.Resource[SchedulerConfigSpec, SchedulerConfigExtens
 //
 //gotagsrewrite:gen
 type SchedulerConfigSpec struct {
-	Enabled              bool              `yaml:"enabled" protobuf:"1"`
-	Image                string            `yaml:"image" protobuf:"2"`
-	ExtraArgs            map[string]string `yaml:"extraArgs" protobuf:"3"`
-	ExtraVolumes         []ExtraVolume     `yaml:"extraVolumes" protobuf:"4"`
-	EnvironmentVariables map[string]string `yaml:"environmentVariables" protobuf:"5"`
-	Resources            Resources         `yaml:"resources" protobuf:"6"`
-	Config               map[string]any    `yaml:"config" protobuf:"7"`
+	Enabled              bool                 `yaml:"enabled" protobuf:"1"`
+	Image                string               `yaml:"image" protobuf:"2"`
+	ExtraArgs            map[string]ArgValues `yaml:"extraArgs,omitempty" protobuf:"8"`
+	Args                 []string             `yaml:"args,omitempty" protobuf:"9"`
+	Config               map[string]any       `yaml:"config" protobuf:"7"`
+	ExtraVolumes         []ExtraVolume        `yaml:"extraVolumes" protobuf:"4"`
+	EnvironmentVariables map[string]string    `yaml:"environmentVariables" protobuf:"5"`
+	Resources            Resources            `yaml:"resources" protobuf:"6"`
 }
 
 // NewSchedulerConfig returns new SchedulerConfig resource.
-func NewSchedulerConfig() *SchedulerConfig {
+func NewSchedulerConfig(id resource.ID) *SchedulerConfig {
 	return typed.NewResource[SchedulerConfigSpec, SchedulerConfigExtension](
-		resource.NewMetadata(ControlPlaneNamespaceName, SchedulerConfigType, SchedulerConfigID, resource.VersionUndefined),
-		SchedulerConfigSpec{})
+		resource.NewMetadata(ControlPlaneNamespaceName, SchedulerConfigType, id, resource.VersionUndefined),
+		SchedulerConfigSpec{},
+	)
 }
 
 // SchedulerConfigExtension defines SchedulerConfig resource definition.

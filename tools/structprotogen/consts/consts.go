@@ -251,7 +251,8 @@ func (b *ConstBlocks) FormatProtoFile(w io.Writer) error {
 			}
 
 			if i == 0 && constant.Value != "0" {
-				fmt.Fprintf(w,
+				fmt.Fprintf(
+					w,
 					"  %s_%s_UNSPECIFIED = 0;\n",
 					strings.ToUpper(block.TypePkg),
 					strings.ToUpper(block.TypeName),
@@ -307,8 +308,8 @@ func toCapitalSnakeCase(str string) string {
 	snake = strings.ToUpper(snake)
 
 	// special case for "SomethingsIps"
-	if strings.HasSuffix(snake, "_i_ps") {
-		snake = strings.TrimSuffix(snake, "_i_ps") + "_ips"
+	if before, ok := strings.CutSuffix(snake, "_i_ps"); ok {
+		snake = before + "_ips"
 	}
 
 	return snake

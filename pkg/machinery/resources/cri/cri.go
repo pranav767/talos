@@ -17,7 +17,7 @@ import (
 	config2 "github.com/siderolabs/talos/pkg/machinery/config/config"
 )
 
-//go:generate go tool github.com/siderolabs/deep-copy -type RegistriesConfigSpec -type ImageCacheConfigSpec -type SeccompProfileSpec -header-file ../../../../hack/boilerplate.txt -o deep_copy.generated.go .
+//go:generate go tool github.com/siderolabs/deep-copy -type BaseRuntimeSpecConfigSpec -type CustomizationConfigSpec -type RegistriesConfigSpec -type ImageCacheConfigSpec -type SeccompProfileSpec -header-file ../../../../hack/boilerplate.txt -o deep_copy.generated.go .
 
 //go:generate go tool github.com/dmarkham/enumer -type=ImageCacheStatus -type=ImageCacheCopyStatus -linecomment -text
 
@@ -38,20 +38,28 @@ type Registries interface {
 }
 
 // RegistryBuilder implements image.RegistriesBuilder.
-func RegistryBuilder(st state.State) func(ctx context.Context) (Registries, error) {
+func RegistryBuilder(st state.State, opts ...func(*RegistriesConfigSpec)) func(ctx context.Context) (Registries, error) {
 	return func(ctx context.Context) (Registries, error) {
 		regs, err := safe.StateWatchFor[*RegistriesConfig](ctx, st, NewRegistriesConfig().Metadata(), state.WithEventTypes(state.Created, state.Updated))
 		if err != nil {
 			return nil, err
 		}
 
-		return regs.TypedSpec(), nil
+		spec := regs.TypedSpec()
+
+		// mutate the spec with the provided options
+		for _, opt := range opts {
+			opt(spec)
+		}
+
+		return spec, nil
 	}
 }
 
 // WaitForImageCache waits for the image cache config to be either disabled or ready.
 func WaitForImageCache(ctx context.Context, st state.State) error {
-	_, err := st.WatchFor(ctx, NewImageCacheConfig().Metadata(),
+	_, err := st.WatchFor(
+		ctx, NewImageCacheConfig().Metadata(),
 		state.WithEventTypes(state.Created, state.Updated),
 		state.WithCondition(func(r resource.Resource) (bool, error) {
 			imageCacheConfig, ok := r.(*ImageCacheConfig)
@@ -70,7 +78,8 @@ func WaitForImageCache(ctx context.Context, st state.State) error {
 
 // WaitForImageCacheCopy waits for the image cache copy to be done (or skipped).
 func WaitForImageCacheCopy(ctx context.Context, st state.State) error {
-	_, err := st.WatchFor(ctx, NewImageCacheConfig().Metadata(),
+	_, err := st.WatchFor(
+		ctx, NewImageCacheConfig().Metadata(),
 		state.WithEventTypes(state.Created, state.Updated),
 		state.WithCondition(func(r resource.Resource) (bool, error) {
 			imageCacheConfig, ok := r.(*ImageCacheConfig)

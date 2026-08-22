@@ -79,7 +79,8 @@ func downloadBootAssets(ctx context.Context, qOps *clusterops.Qemu) error {
 
 		destPath := strings.ReplaceAll(
 			strings.ReplaceAll(u.String(), "/", "-"),
-			":", "-")
+			":", "-",
+		)
 
 		_, err = os.Stat(filepath.Join(cacheDir, destPath))
 		if err == nil {
@@ -106,6 +107,10 @@ func downloadBootAssets(ctx context.Context, qOps *clusterops.Qemu) error {
 			q.Set("archive", "false")
 
 			u.RawQuery = q.Encode()
+		}
+
+		if auth, ok := qOps.DownloadHTTPAuth[u.Host]; ok && u.User == nil {
+			u.User = url.UserPassword(auth.Username, auth.Password)
 		}
 
 		_, err = client.Get(ctx, &getter.Request{

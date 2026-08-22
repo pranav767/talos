@@ -69,12 +69,13 @@ func (ctrl *StaticEndpointController) Run(ctx context.Context, r controller.Runt
 
 		r.StartTrackingOutputs()
 
-		if machineConfig != nil && machineConfig.Config().Cluster() != nil {
-			cpHostname := machineConfig.Config().Cluster().Endpoint().Hostname()
+		if machineConfig != nil && machineConfig.Config().K8sClusterConfig() != nil {
+			cpHostname := machineConfig.Config().K8sClusterConfig().ClusterEndpoint().Hostname()
 
 			var (
 				resolver net.Resolver
 				addrs    []netip.Addr
+				hosts    []string
 			)
 
 			addrs, err = resolver.LookupNetIP(ctx, "ip", cpHostname)
@@ -84,8 +85,13 @@ func (ctrl *StaticEndpointController) Run(ctx context.Context, r controller.Runt
 
 			addrs = xslices.Map(addrs, netip.Addr.Unmap)
 
+			if len(addrs) != 1 || addrs[0].String() != cpHostname {
+				hosts = []string{cpHostname}
+			}
+
 			if err = safe.WriterModify(ctx, r, k8s.NewEndpoint(k8s.ControlPlaneNamespaceName, k8s.ControlPlaneKubernetesEndpointsID), func(endpoint *k8s.Endpoint) error {
 				endpoint.TypedSpec().Addresses = addrs
+				endpoint.TypedSpec().Hosts = hosts
 
 				return nil
 			}); err != nil {

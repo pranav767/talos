@@ -18,8 +18,10 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/codes"
 
-	"github.com/siderolabs/talos/internal/pkg/dashboard/util"
+	"github.com/siderolabs/talos/internal/pkg/dashboard/utils"
 	"github.com/siderolabs/talos/pkg/machinery/client"
+	"github.com/siderolabs/talos/pkg/machinery/constants"
+	"github.com/siderolabs/talos/pkg/machinery/resources/block"
 	"github.com/siderolabs/talos/pkg/machinery/resources/cluster"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"github.com/siderolabs/talos/pkg/machinery/resources/hardware"
@@ -44,7 +46,8 @@ type Source struct {
 	eg   errgroup.Group
 	once sync.Once
 
-	COSI state.State
+	COSI  state.State
+	Nodes []string
 
 	ch             chan Data
 	NodeResourceCh <-chan Data
@@ -71,9 +74,9 @@ func (source *Source) run(ctx context.Context) {
 
 	source.NodeResourceCh = source.ch
 
-	for _, nodeContext := range util.NodeContexts(ctx) {
+	for _, node := range source.Nodes {
 		source.eg.Go(func() error {
-			source.runResourceWatchWithRetries(nodeContext.Ctx, nodeContext.Node)
+			source.runResourceWatchWithRetries(utils.NodeContext(ctx, node), node)
 
 			return nil
 		})
@@ -110,13 +113,19 @@ func (source *Source) runResourceWatch(ctx context.Context, node string) error {
 		runtime.NewMachineStatus().Metadata(),
 		runtime.NewSecurityStateSpec(v1alpha1.NamespaceName).Metadata(),
 		config.NewMachineType().Metadata(),
+		// KubeletSpec is sensitive (os:admin only), while KubeletStatus is not, but it is not available on older Talos versions,
+		// so watch both and use whichever comes through.
 		k8s.NewKubeletSpec(k8s.NamespaceName, k8s.KubeletID).Metadata(),
+		k8s.NewKubeletStatus(k8s.NamespaceName, k8s.KubeletID).Metadata(),
 		network.NewResolverStatus(network.NamespaceName, network.ResolverID).Metadata(),
 		network.NewTimeServerStatus(network.NamespaceName, network.TimeServerID).Metadata(),
 		hardware.NewSystemInformation(hardware.SystemInformationID).Metadata(),
+		block.NewVolumeStatus(block.NamespaceName, constants.StatePartitionLabel).Metadata(),
+		block.NewVolumeStatus(block.NamespaceName, constants.EphemeralPartitionLabel).Metadata(),
 		cluster.NewInfo().Metadata(),
 		network.NewStatus(network.NamespaceName, network.StatusID).Metadata(),
 		network.NewHostnameStatus(network.NamespaceName, network.HostnameID).Metadata(),
+		runtime.NewVersion().Metadata(),
 	}
 
 	for _, ptr := range watchResources {

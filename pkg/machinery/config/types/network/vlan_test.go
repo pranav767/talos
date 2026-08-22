@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -29,8 +28,8 @@ func TestVLANConfigMarshalStability(t *testing.T) {
 	cfg := network.NewVLANConfigV1Alpha1("enp0s3.2")
 	cfg.VLANIDConfig = 2
 	cfg.ParentLinkConfig = "enp0s3"
-	cfg.VLANModeConfig = pointer.To(nethelpers.VLANProtocol8021Q)
-	cfg.LinkUp = pointer.To(true)
+	cfg.VLANModeConfig = new(nethelpers.VLANProtocol8021Q)
+	cfg.LinkUp = new(true)
 	cfg.LinkAddresses = []network.AddressConfig{
 		{
 			AddressAddress: netip.MustParsePrefix("192.168.1.100/32"),
@@ -62,9 +61,9 @@ func TestVLANConfigUnmarshal(t *testing.T) {
 		MetaName:         "enp0s3.2",
 		VLANIDConfig:     2,
 		ParentLinkConfig: "enp0s3",
-		VLANModeConfig:   pointer.To(nethelpers.VLANProtocol8021Q),
+		VLANModeConfig:   new(nethelpers.VLANProtocol8021Q),
 		CommonLinkConfig: network.CommonLinkConfig{
-			LinkUp: pointer.To(true),
+			LinkUp: new(true),
 			LinkAddresses: []network.AddressConfig{
 				{
 					AddressAddress: netip.MustParsePrefix("192.168.1.100/32"),
@@ -154,11 +153,11 @@ func TestVLANValidate(t *testing.T) {
 				}
 				cfg.LinkRoutes = []network.RouteConfig{
 					{
-						RouteDestination: network.Prefix{netip.MustParsePrefix("10.3.5.0/24")},
-						RouteGateway:     network.Addr{netip.MustParseAddr("10.3.5.1")},
+						RouteDestination: meta.Prefix{Prefix: netip.MustParsePrefix("10.3.5.0/24")},
+						RouteGateway:     meta.Addr{Addr: netip.MustParseAddr("10.3.5.1")},
 					},
 					{
-						RouteGateway: network.Addr{netip.MustParseAddr("fe80::1")},
+						RouteGateway: meta.Addr{Addr: netip.MustParseAddr("fe80::1")},
 					},
 				}
 

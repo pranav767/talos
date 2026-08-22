@@ -12,8 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/siderolabs/gen/xslices"
+
 	"github.com/siderolabs/talos/internal/integration/base"
 	"github.com/siderolabs/talos/pkg/machinery/client"
+	"github.com/siderolabs/talos/pkg/machinery/config/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/security"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 )
@@ -65,6 +68,14 @@ func (suite *TrustedRootsSuite) TestTrustedRoots() {
 	// build a Talos API context which is tied to the node
 	nodeCtx := client.WithNode(suite.ctx, node)
 
+	// query the current TrustedRoots config to restore it after the test
+	cfg, err := suite.ReadConfigFromNode(nodeCtx)
+	suite.Require().NoError(err)
+
+	originalConfig := xslices.Filter(cfg.Documents(), func(doc config.Document) bool {
+		return doc.Kind() == security.TrustedRootsConfig
+	})
+
 	const name = "test-ca"
 
 	cfgDocument := security.NewTrustedRootsConfigV1Alpha1()
@@ -74,8 +85,11 @@ func (suite *TrustedRootsSuite) TestTrustedRoots() {
 	// clean up custom config if it exists
 	suite.RemoveMachineConfigDocuments(nodeCtx, cfgDocument.MetaKind)
 
-	certificates := suite.readTrustedRoots(nodeCtx)
-	suite.Require().Contains(certificates, "Bundle of CA Root Certificates")
+	// the config change above rewrites the trusted roots file, so retry the read until
+	// the default bundle is observed (avoids racing the file rewrite).
+	suite.Require().Eventually(func() bool {
+		return strings.Contains(suite.readTrustedRoots(nodeCtx), "Bundle of CA Root Certificates")
+	}, 5*time.Second, 100*time.Millisecond)
 
 	// enable custom trusted roots
 	suite.PatchMachineConfig(nodeCtx, cfgDocument)
@@ -90,6 +104,11 @@ func (suite *TrustedRootsSuite) TestTrustedRoots() {
 	suite.Require().Eventually(func() bool {
 		return !strings.Contains(suite.readTrustedRoots(nodeCtx), name)
 	}, 5*time.Second, 100*time.Millisecond)
+
+	// restore back trusted roots config if it existed before the test
+	if len(originalConfig) > 0 {
+		suite.PatchMachineConfig(nodeCtx, xslices.Map(originalConfig, func(d config.Document) any { return d })...)
+	}
 }
 
 func init() {

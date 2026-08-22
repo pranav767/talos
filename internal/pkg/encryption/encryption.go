@@ -26,7 +26,7 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/resources/block"
 )
 
-const keyHandlerTimeout = time.Second * 10
+const keyHandlerTimeout = time.Second * 20
 
 // Helpers provides helper methods for encryption handling.
 type Helpers struct {
@@ -62,10 +62,15 @@ func NewHandler(encryptionConfig block.EncryptionSpec, volumeID string, helpers 
 		opts = append(opts, luks.WithPerfOptions(encryptionConfig.PerfOptions...))
 	}
 
+	if encryptionConfig.AllowDiscards {
+		opts = append(opts, luks.WithAllowDiscards())
+	}
+
 	keyHandlers := make([]keys.Handler, 0, len(encryptionConfig.Keys))
 
 	for _, cfg := range encryptionConfig.Keys {
-		handler, err := keys.NewHandler(cfg,
+		handler, err := keys.NewHandler(
+			cfg,
 			keys.WithVolumeID(volumeID),
 			keys.WithSystemInformationGetter(helpers.GetSystemInformation),
 			keys.WithTPMLocker(helpers.TPMLocker),
@@ -78,7 +83,6 @@ func NewHandler(encryptionConfig block.EncryptionSpec, volumeID string, helpers 
 		keyHandlers = append(keyHandlers, handler)
 	}
 
-	//nolint:scopelint
 	slices.SortFunc(keyHandlers, func(a, b keys.Handler) int { return cmp.Compare(a.Slot(), b.Slot()) })
 
 	provider := luks.New(
@@ -223,7 +227,7 @@ func (h *Handler) syncKeys(ctx context.Context, logger *zap.Logger, path string,
 
 				failedSyncs = append(failedSyncs, fmt.Sprintf("error updating key slot %s %T: %s", slot, handler, err))
 			} else {
-				logger.Info("updated encryption key", zap.Int("slot", handler.Slot()))
+				logger.Info("updated encryption key", zap.Int("slot", handler.Slot()), zap.String("handler", fmt.Sprintf("%T", handler)))
 			}
 		} else {
 			// keyslot does not exist so just add the key
@@ -232,7 +236,7 @@ func (h *Handler) syncKeys(ctx context.Context, logger *zap.Logger, path string,
 
 				failedSyncs = append(failedSyncs, fmt.Sprintf("error adding key slot %s %T: %s", slot, handler, err))
 			} else {
-				logger.Info("added encryption key", zap.Int("slot", handler.Slot()))
+				logger.Info("added encryption key", zap.Int("slot", handler.Slot()), zap.String("handler", fmt.Sprintf("%T", handler)))
 			}
 		}
 	}
@@ -250,7 +254,7 @@ func (h *Handler) syncKeys(ctx context.Context, logger *zap.Logger, path string,
 
 				failedSyncs = append(failedSyncs, fmt.Sprintf("error removing key slot %s: %s", slot, err))
 			} else {
-				logger.Info("removed encryption key", zap.Int("slot", k.Slot))
+				logger.Info("removed encryption key", zap.Int("slot", int(s)))
 			}
 		}
 	}
@@ -347,7 +351,7 @@ func (h *Handler) tryHandlers(
 		if err != nil {
 			errs = multierror.Append(errs, err)
 
-			logger.Warn("failed to call key handler", zap.Int("slot", h.Slot()), zap.Error(err))
+			logger.Warn("failed to call key handler", zap.Int("slot", h.Slot()), zap.String("handler", fmt.Sprintf("%T", h)), zap.Error(err))
 
 			continue
 		}

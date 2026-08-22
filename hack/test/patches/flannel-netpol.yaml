@@ -1,0 +1,5 @@
+# enable network policies in flannel CNI plugin
+# see PR: https://github.com/siderolabs/talos/pull/12590
+apiVersion: v1alpha1
+kind: KubeFlannelCNIConfig
+kubeNetworkPoliciesEnabled: true

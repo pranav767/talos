@@ -20,7 +20,6 @@ import (
 	"github.com/cosi-project/runtime/pkg/safe"
 	"github.com/cosi-project/runtime/pkg/state"
 	"github.com/siderolabs/gen/optional"
-	"github.com/siderolabs/go-pointer"
 	pb "github.com/siderolabs/siderolink/api/siderolink"
 	"github.com/siderolabs/siderolink/pkg/wireguard"
 	"go.uber.org/zap"
@@ -82,14 +81,9 @@ func (ctrl *ManagerController) Outputs() []controller.Output {
 //
 //nolint:gocyclo,cyclop
 func (ctrl *ManagerController) Run(ctx context.Context, r controller.Runtime, logger *zap.Logger) error {
-	if fipsmode.Strict() {
-		logger.Warn("SideroLink is not supported in strict FIPS mode")
-
-		return nil
-	}
-
 	// initially, wait for the network address status to be ready
-	if err := networkutils.WaitForNetworkReady(ctx, r,
+	if err := networkutils.WaitForNetworkReady(
+		ctx, r,
 		func(status *network.StatusSpec) bool {
 			return status.AddressReady
 		},
@@ -134,7 +128,10 @@ func (ctrl *ManagerController) Run(ctx context.Context, r controller.Runtime, lo
 	if bytes.Equal(ctrl.nodeKey[:], zeroKey[:]) {
 		var err error
 
-		ctrl.nodeKey, err = wgtypes.GeneratePrivateKey()
+		fipsmode.SkipEnforcement(logger, "siderolink.GenerateKey", func() {
+			ctrl.nodeKey, err = wgtypes.GeneratePrivateKey()
+		})
+
 		if err != nil {
 			return fmt.Errorf("error generating Wireguard key: %w", err)
 		}
@@ -294,7 +291,8 @@ func (ctrl *ManagerController) Run(ctx context.Context, r controller.Runtime, lo
 				return err
 			}
 
-			if err = safe.WriterModify(ctx, r, siderolink.NewTunnel(),
+			if err = safe.WriterModify(
+				ctx, r, siderolink.NewTunnel(),
 				func(tunnel *siderolink.Tunnel) error {
 					tunnel.TypedSpec().APIEndpoint = ctrl.pd.apiEndpont
 					tunnel.TypedSpec().LinkName = linkName
@@ -369,7 +367,6 @@ func (ctrl *ManagerController) provision(ctx context.Context, r controller.Runti
 		conn, connErr := grpc.NewClient(
 			cfg.TypedSpec().Host,
 			withTransportCredentials(cfg.TypedSpec().Insecure),
-			grpc.WithSharedWriteBuffer(true),
 			grpc.WithContextDialer(dialer.DynamicProxyDialerWithTLSConfig(httpdefaults.RootCAsTLSConfig)),
 		)
 		if connErr != nil {
@@ -390,22 +387,28 @@ func (ctrl *ManagerController) provision(ctx context.Context, r controller.Runti
 		var wgOverGRPC *bool
 
 		if cfg.TypedSpec().Tunnel {
-			wgOverGRPC = pointer.To(true)
+			wgOverGRPC = new(true)
 		}
+
+		var publicKeyString string
+
+		fipsmode.SkipEnforcement(logger, "siderolink.GenerateKey", func() {
+			publicKeyString = ctrl.nodeKey.PublicKey().String()
+		})
 
 		sideroLinkClient := pb.NewProvisionServiceClient(conn)
 		request := &pb.ProvisionRequest{
 			NodeUuid:          nodeUUID,
-			NodePublicKey:     ctrl.nodeKey.PublicKey().String(),
-			NodeUniqueToken:   pointer.To(uniqTokenRes.TypedSpec().Token),
-			TalosVersion:      pointer.To(version.Tag),
+			NodePublicKey:     publicKeyString,
+			NodeUniqueToken:   new(uniqTokenRes.TypedSpec().Token),
+			TalosVersion:      new(version.Tag),
 			WireguardOverGrpc: wgOverGRPC,
 		}
 
 		token := cfg.TypedSpec().JoinToken
 
 		if token != "" {
-			request.JoinToken = pointer.To(token)
+			request.JoinToken = new(token)
 		}
 
 		return sideroLinkClient.Provision(ctx, request)

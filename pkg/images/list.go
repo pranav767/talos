@@ -6,6 +6,7 @@ package images
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/google/go-containerregistry/pkg/name"
 
@@ -22,6 +23,7 @@ type Versions struct {
 	Kubelet               name.Tag
 	KubeAPIServer         name.Tag
 	KubeControllerManager name.Tag
+	KubeNetworkPolicies   name.Tag
 	KubeProxy             name.Tag
 	KubeScheduler         name.Tag
 
@@ -31,20 +33,38 @@ type Versions struct {
 // DefaultSandboxImage is defined as a constant in cri package of containerd, and it's not exported.
 //
 // The integration test verifies that our constant is accurate.
-const DefaultSandboxImage = "registry.k8s.io/pause:3.10.1"
+const DefaultSandboxImage = "registry.k8s.io/pause:3.10.2"
+
+// Flannel returns the Flannel image built into Talos, mirrored from docker.io/flannel/flannel.
+//
+// It is not configurable, so it never depends on the machine configuration.
+func Flannel() name.Tag {
+	return mustParseTag(fmt.Sprintf("ghcr.io/siderolabs/flannel:%s", constants.FlannelVersion))
+}
+
+// KubeNetworkPolicies returns the kube-network-policies image built into Talos.
+//
+// It is not configurable, so it never depends on the machine configuration.
+func KubeNetworkPolicies() name.Tag {
+	return mustParseTag(fmt.Sprintf("registry.k8s.io/networking/kube-network-policies:%s", constants.KubeNetworkPoliciesVersion))
+}
 
 // List returns default image versions.
+//
+// It panics on any image which is empty in the config, so it should only be used with
+// a config which is known to have all images set (e.g. a synthetic one built in talosctl).
 func List(config config.Config) Versions {
 	var images Versions
 
 	images.Etcd = mustParseTag(config.Cluster().Etcd().Image())
-	images.CoreDNS = mustParseTag(config.Cluster().CoreDNS().Image())
-	images.Flannel = mustParseTag(fmt.Sprintf("ghcr.io/siderolabs/flannel:%s", constants.FlannelVersion)) // mirrored from docker.io/flannelcni/flannel
-	images.Kubelet = mustParseTag(config.Machine().Kubelet().Image())
-	images.KubeAPIServer = mustParseTag(config.Cluster().APIServer().Image())
-	images.KubeControllerManager = mustParseTag(config.Cluster().ControllerManager().Image())
-	images.KubeProxy = mustParseTag(config.Cluster().Proxy().Image())
-	images.KubeScheduler = mustParseTag(config.Cluster().Scheduler().Image())
+	images.CoreDNS = mustParseTag(config.K8sCoreDNSConfig().Image())
+	images.Flannel = Flannel()
+	images.Kubelet = mustParseTag(config.K8sKubeletConfig().Image())
+	images.KubeAPIServer = mustParseTag(config.K8sAPIServerConfig().Image())
+	images.KubeControllerManager = mustParseTag(config.K8sControllerManagerConfig().Image())
+	images.KubeNetworkPolicies = KubeNetworkPolicies()
+	images.KubeProxy = mustParseTag(config.K8sProxyConfig().Image())
+	images.KubeScheduler = mustParseTag(config.K8sSchedulerConfig().Image())
 
 	images.Pause = mustParseTag(DefaultSandboxImage)
 
@@ -72,6 +92,9 @@ type VersionsListOptions struct {
 
 	// PauseVersion overrides the default pause container image version.
 	PauseVersion string
+
+	// KubeNetworkPoliciesVersion overrides the default kube-network-policies version.
+	KubeNetworkPoliciesVersion string
 }
 
 // ListWithOptions returns image versions with overrides.
@@ -102,10 +125,16 @@ func ListWithOptions(config config.Config, opts VersionsListOptions) Versions {
 		images.KubeScheduler = images.KubeScheduler.Tag(opts.KubernetesVersion)
 	}
 
+	if opts.KubeNetworkPoliciesVersion != "" {
+		images.KubeNetworkPolicies = images.KubeNetworkPolicies.Tag(opts.KubeNetworkPoliciesVersion)
+	}
+
 	return images
 }
 
 func mustParseTag(s string) name.Tag {
+	s, _, _ = strings.Cut(s, "@") // ignore digest if present
+
 	r, err := name.ParseReference(s)
 	if err != nil {
 		panic(err)

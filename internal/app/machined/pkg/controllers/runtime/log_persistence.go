@@ -31,6 +31,7 @@ type LogPersistenceController struct {
 	startup sync.Once
 	// RLocked by the log writers, Locked by volume handlers
 	canLog        sync.RWMutex
+	canLogLocked  bool // mirrors the state of canLog, used only in single-threaded context
 	files         *concurrent.HashTrieMap[string, *logfile.LogFile]
 	logMountPoint string
 }
@@ -82,17 +83,25 @@ func (ctrl *LogPersistenceController) WriteLog(id string, line []byte) error {
 	return lf.Write(line)
 }
 
-func (ctrl *LogPersistenceController) startLogging(vms *block.VolumeMountStatus) {
+func (ctrl *LogPersistenceController) startLogging(logger *zap.Logger, vms *block.VolumeMountStatus) {
 	// here we can start logging activities
 	ctrl.logMountPoint = vms.TypedSpec().Target
 
 	ctrl.canLog.Unlock()
+	ctrl.canLogLocked = false
+
+	logger.Debug("log persistence started")
 }
 
-func (ctrl *LogPersistenceController) stopLogging() error {
+func (ctrl *LogPersistenceController) stopLogging(logger *zap.Logger) error {
+	logger.Debug("log persistence stopping", zap.Bool("active", !ctrl.canLogLocked))
+
 	// Stop all logging activities, close files
 	// after this call we should not hold /var/log
-	ctrl.canLog.Lock()
+	if !ctrl.canLogLocked {
+		ctrl.canLog.Lock()
+		ctrl.canLogLocked = true
+	}
 
 	for _, f := range ctrl.files.All() {
 		if err := f.Close(); err != nil {
@@ -113,12 +122,23 @@ func (ctrl *LogPersistenceController) Run(ctx context.Context, r controller.Runt
 		ctrl.files = concurrent.NewHashTrieMap[string, *logfile.LogFile]()
 		// Block writes until /var/log is ready
 		ctrl.canLog.Lock()
+		ctrl.canLogLocked = true
 
 		ctrl.V1Alpha1Logging.SetLineWriter(ctrl)
 	})
 
 	ticker := time.NewTicker(constants.LogFlushPeriod)
 	defer ticker.Stop()
+
+	defer func() {
+		// if the context is canceled, the controller runtime is shutting down
+		// so stop the logging unconditionally to clear the open files in /var
+		if ctx.Err() != nil {
+			if err := ctrl.stopLogging(logger); err != nil {
+				logger.Error("error stopping persistent logging", zap.Error(err))
+			}
+		}
+	}()
 
 	for {
 		select {
@@ -139,11 +159,12 @@ func (ctrl *LogPersistenceController) Run(ctx context.Context, r controller.Runt
 
 		// create a volume mount request for the logs volume mount point
 		// to keep it alive and prevent it from being torn down
-		if err := safe.WriterModify(ctx, r,
+		if err := safe.WriterModify(
+			ctx, r,
 			block.NewVolumeMountRequest(block.NamespaceName, requestID),
 			func(v *block.VolumeMountRequest) error {
 				v.TypedSpec().Requester = ctrl.Name()
-				v.TypedSpec().VolumeID = constants.LogMountPoint
+				v.TypedSpec().VolumeID = constants.LogVolumeID
 
 				return nil
 			},
@@ -168,11 +189,11 @@ func (ctrl *LogPersistenceController) Run(ctx context.Context, r controller.Runt
 					return fmt.Errorf("error adding finalizer to volume mount status for log volume: %w", err)
 				}
 
-				ctrl.startLogging(vms)
+				ctrl.startLogging(logger, vms)
 			}
 		case resource.PhaseTearingDown:
 			if vms.Metadata().Finalizers().Has(ctrl.Name()) {
-				if err = ctrl.stopLogging(); err != nil {
+				if err = ctrl.stopLogging(logger); err != nil {
 					return fmt.Errorf("error stopping persistent logging: %w", err)
 				}
 

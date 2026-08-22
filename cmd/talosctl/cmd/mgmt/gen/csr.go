@@ -49,7 +49,7 @@ var genCSRCmd = &cobra.Command{
 			return fmt.Errorf("error parsing ECDSA key: %s", err)
 		}
 
-		var opts []x509.Option
+		var opts []x509.Option //nolint:prealloc // dynamic
 
 		parsed := net.ParseIP(genCSRCmdFlags.ip)
 		if parsed == nil {
@@ -62,6 +62,7 @@ var genCSRCmd = &cobra.Command{
 		}
 
 		ips := []net.IP{parsed}
+
 		opts = append(opts, x509.Organization(roles.Strings()...))
 		opts = append(opts, x509.IPAddresses(ips))
 

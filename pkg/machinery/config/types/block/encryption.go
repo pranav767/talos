@@ -51,14 +51,16 @@ type EncryptionSpec struct {
 	EncryptionBlockSize uint64 `yaml:"blockSize,omitempty"`
 	//   description: >
 	//     Additional --perf parameters for the LUKS2 encryption.
-	//   values:
-	//     - no_read_workqueue
-	//     - no_write_workqueue
-	//     - same_cpu_crypt
 	//   examples:
 	//     -  value: >
 	//          []string{"no_read_workqueue","no_write_workqueue"}
 	EncryptionPerfOptions []string `yaml:"options,omitempty"`
+	//   description: >
+	//     Allow TRIM/discard requests to be passed through to the underlying device
+	//     when the encrypted volume is opened.
+	//
+	//     Defaults to false.
+	EncryptionAllowDiscards *bool `yaml:"allowDiscards,omitempty"`
 }
 
 func exampleEncryptionSpec() *EncryptionSpec {
@@ -86,6 +88,19 @@ func exampleEncryptionSpec() *EncryptionSpec {
 // IsZero checks if the encryption spec is zero.
 func (s EncryptionSpec) IsZero() bool {
 	return s.EncryptionProvider == block.EncryptionProviderNone && len(s.EncryptionKeys) == 0
+}
+
+// Redact replaces any embedded static passphrases with the given replacement.
+func (s *EncryptionSpec) Redact(replacement string) {
+	for i := range s.EncryptionKeys {
+		if s.EncryptionKeys[i].KeyStatic == nil {
+			continue
+		}
+
+		if s.EncryptionKeys[i].KeyStatic.KeyData != "" {
+			s.EncryptionKeys[i].KeyStatic.KeyData = replacement
+		}
+	}
 }
 
 // EncryptionKey represents configuration for disk encryption key.
@@ -230,6 +245,11 @@ func (s EncryptionSpec) BlockSize() uint64 {
 // Options implements the config.Provider interface.
 func (s EncryptionSpec) Options() []string {
 	return s.EncryptionPerfOptions
+}
+
+// AllowDiscards implements the config.Provider interface.
+func (s EncryptionSpec) AllowDiscards() bool {
+	return pointer.SafeDeref(s.EncryptionAllowDiscards)
 }
 
 // Keys implements the config.Provider interface.

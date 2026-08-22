@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,6 +31,7 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 	"github.com/siderolabs/talos/pkg/machinery/kernel"
 	"github.com/siderolabs/talos/pkg/provision"
+	"github.com/siderolabs/talos/pkg/provision/providers/vm"
 )
 
 //nolint:gocyclo,cyclop
@@ -37,13 +39,18 @@ func (p *provisioner) createNode(ctx context.Context, state *provision.State, cl
 	arch := Arch(opts.TargetArch)
 	pidPath := state.GetRelativePath(fmt.Sprintf("%s.pid", nodeReq.Name))
 
-	var pflashImages []string
+	var (
+		pflashImages []string
+		pflashSpec   []PFlash
+	)
 
-	if pflashSpec := arch.PFlash(opts.UEFIEnabled, opts.ExtraUEFISearchPaths); pflashSpec != nil {
+	if spec := arch.PFlash(opts.UEFIEnabled, opts.ExtraUEFISearchPaths); spec != nil {
 		var err error
-		if pflashImages, err = p.createPFlashImages(state, nodeReq.Name, pflashSpec); err != nil {
+		if pflashImages, err = p.createPFlashImages(state, nodeReq.Name, spec); err != nil {
 			return provision.NodeInfo{}, fmt.Errorf("error creating flash images: %w", err)
 		}
+
+		pflashSpec = spec
 	}
 
 	vcpuCount := int64(math.RoundToEven(float64(nodeReq.NanoCPUs) / 1000 / 1000 / 1000))
@@ -95,10 +102,6 @@ func (p *provisioner) createNode(ctx context.Context, state *provision.State, cl
 		}
 	}
 
-	if opts.WithDebugShell {
-		cmdline.Append("talos.debugshell", "")
-	}
-
 	var (
 		nodeConfig   string
 		extraISOPath string
@@ -116,7 +119,7 @@ func (p *provisioner) createNode(ctx context.Context, state *provision.State, cl
 		case provision.ConfigInjectionMethodMetalISO:
 			cmdline.Append("talos.config", "metal-iso")
 
-			extraISOPath, err = p.createMetalConfigISO(state, nodeReq.Name, nodeConfig)
+			extraISOPath, err = p.createMetalConfigISO(ctx, state, nodeReq.Name, nodeConfig)
 			if err != nil {
 				return provision.NodeInfo{}, fmt.Errorf("error creating metal-iso: %w", err)
 			}
@@ -176,6 +179,7 @@ func (p *provisioner) createNode(ctx context.Context, state *provision.State, cl
 		KernelArgs:                cmdline.String(),
 		ExtraISOPath:              extraISOPath,
 		PFlashImages:              pflashImages,
+		PFlashSpec:                pflashSpec,
 		MonitorPath:               state.GetRelativePath(fmt.Sprintf("%s.monitor", nodeReq.Name)),
 		BadRTC:                    nodeReq.BadRTC,
 		DefaultBootOrder:          defaultBootOrder,
@@ -186,13 +190,27 @@ func (p *provisioner) createNode(ctx context.Context, state *provision.State, cl
 		TFTPServer:                nodeReq.TFTPServer,
 		IPXEBootFileName:          nodeReq.IPXEBootFilename,
 		APIBindAddress:            apiBind,
-		WithDebugShell:            opts.WithDebugShell,
 		IOMMUEnabled:              opts.IOMMUEnabled,
 		Network:                   getLaunchNetworkConfig(state, clusterReq, nodeReq),
 
 		// Generate a random MAC address.
 		// On linux this is later overridden to the interface mac.
 		VMMac: getRandomMacAddress(),
+
+		// BGP test uplinks: dedicated per-node bridges for full CLOS, or an extra L2-only NIC on the
+		// management bridge for the inbound VRF-listener test. The node index must match CreateBGP.
+		FabricUplinks: buildFabricUplinks(
+			clusterReq.Network.Name,
+			state.BridgeName,
+			slices.IndexFunc(clusterReq.Nodes, func(n provision.NodeRequest) bool { return n.Name == nodeReq.Name }),
+			clusterReq.Network.FabricUplinks,
+			clusterReq.Network.MTU,
+			opts.BGPEnabled,
+			opts.BGPCLOS,
+		),
+
+		// authentic full-CLOS node: no management net0, only the fabric uplinks above.
+		CLOSNoNet0: clusterReq.Network.CLOSNoNet0,
 	}
 
 	if clusterReq.IPXEBootScript != "" {
@@ -379,7 +397,7 @@ func (p *provisioner) handleOptionalZSTDDiskImage(provisionerDisk, diskImagePath
 	return err
 }
 
-func (p *provisioner) createMetalConfigISO(state *provision.State, nodeName, config string) (string, error) {
+func (p *provisioner) createMetalConfigISO(ctx context.Context, state *provision.State, nodeName, config string) (string, error) {
 	isoPath := state.GetRelativePath(nodeName + "-metal-config.iso")
 
 	tmpDir, err := os.MkdirTemp("", "talos-metal-config-iso")
@@ -393,7 +411,7 @@ func (p *provisioner) createMetalConfigISO(state *provision.State, nodeName, con
 		return "", err
 	}
 
-	_, err = cmd.Run("mkisofs", "-joliet", "-rock", "-volid", "metal-iso", "-output", isoPath, tmpDir)
+	_, err = cmd.RunWithOptions(ctx, "mkisofs", []string{"-joliet", "-rock", "-volid", "metal-iso", "-output", isoPath, tmpDir})
 	if err != nil {
 		return "", err
 	}
@@ -426,4 +444,44 @@ func getRandomMacAddress() string {
 	buf[0] = buf[0]&^multicast | local
 
 	return net.HardwareAddr(buf).String()
+}
+
+// buildFabricUplinks builds the additional L2-only NICs used by the BGP integration topologies.
+func buildFabricUplinks(networkName, managementBridge string, nodeIdx, count, mtu int, bgpEnabled, bgpCLOS bool) []FabricUplink {
+	if nodeIdx < 0 {
+		return nil
+	}
+
+	uplinks := make([]FabricUplink, 0, count+1)
+
+	for u := range count {
+		bridge := vm.FabricBridgeName(networkName, nodeIdx, u)
+
+		uplinks = append(uplinks, FabricUplink{
+			BridgeName:  bridge,
+			IfName:      fmt.Sprintf("vethf%d", u),
+			CNIConfList: fabricCNIConfList(bridge, mtu),
+		})
+	}
+
+	if bgpEnabled && !bgpCLOS {
+		uplinks = append(uplinks, FabricUplink{
+			BridgeName:  managementBridge,
+			IfName:      "vethvrf",
+			CNIConfList: fabricCNIConfList(managementBridge, mtu),
+		})
+	}
+
+	return uplinks
+}
+
+// fabricCNIConfList returns an L2-only bridge CNI conflist (no IPAM, gateway, or masquerade) plus
+// tc-redirect-tap.
+func fabricCNIConfList(bridge string, mtu int) string {
+	return fmt.Sprintf(
+		`{"name":%q,"cniVersion":"0.4.0","plugins":[`+
+			`{"type":"bridge","bridge":%q,"ipMasq":false,"isGateway":false,"mtu":%d,"ipam":{}},`+
+			`{"type":"tc-redirect-tap"}]}`,
+		bridge, bridge, mtu,
+	)
 }

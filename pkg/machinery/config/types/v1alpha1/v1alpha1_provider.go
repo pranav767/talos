@@ -6,6 +6,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"slices"
 	"strings"
@@ -73,6 +74,11 @@ func (c *Config) Machine() config.MachineConfig {
 	return c.MachineConfig
 }
 
+// UdevRulesConfig implements the config.Provider interface.
+func (c *Config) UdevRulesConfig() config.UdevConfig {
+	return c.Machine().Udev()
+}
+
 // SeccompProfiles implements the config.Provider interface.
 func (m *MachineConfig) SeccompProfiles() []config.SeccompProfile {
 	return xslices.Map(m.MachineSeccompProfiles, func(m *MachineSeccompProfile) config.SeccompProfile { return m })
@@ -88,26 +94,6 @@ func (m *MachineSeccompProfile) Value() map[string]any {
 	return m.MachineSeccompProfileValue.Object
 }
 
-// NodeLabels implements the config.Provider interface.
-func (m *MachineConfig) NodeLabels() config.NodeLabels {
-	return m.MachineNodeLabels
-}
-
-// NodeAnnotations implements the config.Provider interface.
-func (m *MachineConfig) NodeAnnotations() config.NodeAnnotations {
-	return m.MachineNodeAnnotations
-}
-
-// NodeTaints implements the config.Provider interface.
-func (m *MachineConfig) NodeTaints() config.NodeTaints {
-	return m.MachineNodeTaints
-}
-
-// BaseRuntimeSpecOverrides implements the config.Provider interface.
-func (m *MachineConfig) BaseRuntimeSpecOverrides() map[string]any {
-	return m.MachineBaseRuntimeSpecOverrides.Object
-}
-
 // Cluster implements the config.Provider interface.
 func (c *Config) Cluster() config.ClusterConfig {
 	if c == nil || c.ClusterConfig == nil {
@@ -119,7 +105,7 @@ func (c *Config) Cluster() config.ClusterConfig {
 
 // Redact implements the config.SecretDocument interface.
 //
-//nolint:gocyclo
+//nolint:gocyclo,cyclop
 func (c *Config) Redact(replacement string) {
 	if c == nil {
 		return
@@ -141,6 +127,59 @@ func (c *Config) Redact(replacement string) {
 		c.MachineConfig.MachineToken = redactStr(c.MachineConfig.MachineToken)
 		if c.MachineConfig.MachineCA != nil {
 			c.MachineConfig.MachineCA.Key = redactBytes(c.MachineConfig.MachineCA.Key)
+		}
+
+		for _, registry := range c.MachineConfig.MachineRegistries.RegistryConfig {
+			if registry == nil {
+				continue
+			}
+
+			if registry.RegistryAuth != nil {
+				registry.RegistryAuth.RegistryPassword = redactStr(registry.RegistryAuth.RegistryPassword)
+				registry.RegistryAuth.RegistryAuth = redactStr(registry.RegistryAuth.RegistryAuth)
+				registry.RegistryAuth.RegistryIdentityToken = redactStr(registry.RegistryAuth.RegistryIdentityToken)
+			}
+
+			if registry.RegistryTLS != nil && registry.RegistryTLS.TLSClientIdentity != nil {
+				registry.RegistryTLS.TLSClientIdentity.Key = redactBytes(registry.RegistryTLS.TLSClientIdentity.Key)
+			}
+		}
+
+		if c.MachineConfig.MachineNetwork != nil {
+			for _, device := range c.MachineConfig.MachineNetwork.NetworkInterfaces {
+				if device == nil {
+					continue
+				}
+
+				redactDeviceSecrets(device, redactStr)
+
+				for _, vlan := range device.DeviceVlans {
+					if vlan == nil {
+						continue
+					}
+
+					redactVIPSecrets(vlan.VlanVIP, redactStr)
+				}
+			}
+		}
+
+		if c.MachineConfig.MachineSystemDiskEncryption != nil {
+			for _, partition := range []*EncryptionConfig{
+				c.MachineConfig.MachineSystemDiskEncryption.StatePartition,
+				c.MachineConfig.MachineSystemDiskEncryption.EphemeralPartition,
+			} {
+				if partition == nil {
+					continue
+				}
+
+				for _, key := range partition.EncryptionKeys {
+					if key == nil || key.KeyStatic == nil {
+						continue
+					}
+
+					key.KeyStatic.KeyData = redactStr(key.KeyStatic.KeyData)
+				}
+			}
 		}
 	}
 
@@ -165,6 +204,28 @@ func (c *Config) Redact(replacement string) {
 		if c.ClusterConfig.EtcdConfig != nil && c.ClusterConfig.EtcdConfig.RootCA != nil {
 			c.ClusterConfig.EtcdConfig.RootCA.Key = redactBytes(c.ClusterConfig.EtcdConfig.RootCA.Key)
 		}
+	}
+}
+
+func redactDeviceSecrets(device *Device, redactStr func(string) string) {
+	if device.DeviceWireguardConfig != nil {
+		device.DeviceWireguardConfig.WireguardPrivateKey = redactStr(device.DeviceWireguardConfig.WireguardPrivateKey)
+	}
+
+	redactVIPSecrets(device.DeviceVIPConfig, redactStr)
+}
+
+func redactVIPSecrets(vip *DeviceVIPConfig, redactStr func(string) string) {
+	if vip == nil {
+		return
+	}
+
+	if vip.EquinixMetalConfig != nil {
+		vip.EquinixMetalConfig.EquinixMetalAPIToken = redactStr(vip.EquinixMetalConfig.EquinixMetalAPIToken)
+	}
+
+	if vip.HCloudConfig != nil {
+		vip.HCloudConfig.HCloudAPIToken = redactStr(vip.HCloudConfig.HCloudAPIToken)
 	}
 }
 
@@ -194,57 +255,6 @@ func (m *MachineConfig) Network() config.MachineNetwork {
 	}
 
 	return m.MachineNetwork
-}
-
-// Controlplane implements the config.Provider interface.
-func (m *MachineConfig) Controlplane() config.MachineControlPlane {
-	if m.MachineControlPlane == nil {
-		return &MachineControlPlaneConfig{}
-	}
-
-	return m.MachineControlPlane
-}
-
-// Pods implements the config.Provider interface.
-func (m *MachineConfig) Pods() []map[string]any {
-	return xslices.Map(m.MachinePods, func(u Unstructured) map[string]any { return u.Object })
-}
-
-// ControllerManager implements the config.Provider interface.
-func (m *MachineControlPlaneConfig) ControllerManager() config.MachineControllerManager {
-	if m.MachineControllerManager == nil {
-		return &MachineControllerManagerConfig{}
-	}
-
-	return m.MachineControllerManager
-}
-
-// Scheduler implements the config.Provider interface.
-func (m *MachineControlPlaneConfig) Scheduler() config.MachineScheduler {
-	if m.MachineScheduler == nil {
-		return &MachineSchedulerConfig{}
-	}
-
-	return m.MachineScheduler
-}
-
-// Disabled implements the config.Provider interface.
-func (m *MachineControllerManagerConfig) Disabled() bool {
-	return pointer.SafeDeref(m.MachineControllerManagerDisabled)
-}
-
-// Disabled implements the config.Provider interface.
-func (m *MachineSchedulerConfig) Disabled() bool {
-	return pointer.SafeDeref(m.MachineSchedulerDisabled)
-}
-
-// Kubelet implements the config.Provider interface.
-func (m *MachineConfig) Kubelet() config.Kubelet {
-	if m.MachineKubelet == nil {
-		return &KubeletConfig{}
-	}
-
-	return m.MachineKubelet
 }
 
 // Env implements the config.Provider interface.
@@ -343,14 +353,8 @@ func (m *MachineConfig) Logging() config.Logging {
 	return m.MachineLogging
 }
 
-// Kernel implements the config.MachineConfig interface.
-func (m *MachineConfig) Kernel() config.Kernel {
-	if m.MachineKernel == nil {
-		return &KernelConfig{}
-	}
-
-	return m.MachineKernel
-}
+// K8sKubeletConfigSignal implements the config.K8sKubeletConfig interface.
+func (k *KubeletConfig) K8sKubeletConfigSignal() {}
 
 // Image implements the config.Provider interface.
 func (k *KubeletConfig) Image() string {
@@ -373,12 +377,12 @@ func (k *KubeletConfig) ClusterDNS() []string {
 }
 
 // ExtraArgs implements the config.Provider interface.
-func (k *KubeletConfig) ExtraArgs() map[string]string {
+func (k *KubeletConfig) ExtraArgs() map[string][]string {
 	if k == nil || k.KubeletExtraArgs == nil {
-		return make(map[string]string)
+		return make(map[string][]string)
 	}
 
-	return k.KubeletExtraArgs
+	return k.KubeletExtraArgs.ToMap()
 }
 
 // ExtraMounts implements the config.Provider interface.
@@ -427,33 +431,9 @@ func (k *KubeletConfig) DefaultRuntimeSeccompProfileEnabled() bool {
 	return pointer.SafeDeref(k.KubeletDefaultRuntimeSeccompProfileEnabled)
 }
 
-// RegisterWithFQDN implements the config.Provider interface.
-func (k *KubeletConfig) RegisterWithFQDN() bool {
-	return pointer.SafeDeref(k.KubeletRegisterWithFQDN)
-}
-
-// NodeIP implements the config.Provider interface.
-func (k *KubeletConfig) NodeIP() config.KubeletNodeIP {
-	if k.KubeletNodeIP == nil {
-		return &KubeletNodeIPConfig{}
-	}
-
-	return k.KubeletNodeIP
-}
-
-// SkipNodeRegistration implements the config.Provider interface.
-func (k *KubeletConfig) SkipNodeRegistration() bool {
-	return pointer.SafeDeref(k.KubeletSkipNodeRegistration)
-}
-
 // DisableManifestsDirectory implements the KubeletConfig interface.
 func (k *KubeletConfig) DisableManifestsDirectory() bool {
 	return pointer.SafeDeref(k.KubeletDisableManifestsDirectory)
-}
-
-// ValidSubnets implements the config.Provider interface.
-func (k *KubeletNodeIPConfig) ValidSubnets() []string {
-	return k.KubeletNodeIPValidSubnets
 }
 
 // RegistryMirrorConfigs returns a map of registry mirror configurations.
@@ -507,6 +487,14 @@ func (c *Config) RegistryTLSConfigs() map[string]config.RegistryTLSConfig {
 	}
 
 	return result
+}
+
+// ImageVerificationConfigs implements the config.Config interface.
+//
+// v1alpha1 config does not support image verification configs in the main document,
+// they are provided as separate documents.
+func (c *Config) ImageVerificationConfigs() map[string]config.ImageVerificationConfig {
+	return nil
 }
 
 type registryEndpointWrapper struct {
@@ -593,15 +581,6 @@ func (n *NetworkConfig) getDevice(iface IfaceSelector) *Device {
 // ExtraHosts implements the config.Provider interface.
 func (n *NetworkConfig) ExtraHosts() []config.NetworkStaticHostConfig {
 	return xslices.Map(n.ExtraHostEntries, func(e *ExtraHost) config.NetworkStaticHostConfig { return e })
-}
-
-// KubeSpan implements the config.Provider interface.
-func (n *NetworkConfig) KubeSpan() config.KubeSpan {
-	if n.NetworkKubeSpan == nil {
-		return &NetworkKubeSpan{}
-	}
-
-	return n.NetworkKubeSpan
 }
 
 // IP implements the MachineNetwork interface.
@@ -1177,8 +1156,8 @@ func (k *NetworkKubeSpan) MTU() uint32 {
 	return mtu
 }
 
-// Filters implements the KubeSpan interface.
-func (k *NetworkKubeSpan) Filters() config.KubeSpanFilters {
+// Filters implements the NetworkKubeSpanConfig interface.
+func (k *NetworkKubeSpan) Filters() config.NetworkKubeSpanFilters {
 	if k.KubeSpanFilters == nil {
 		return &KubeSpanFilters{}
 	}
@@ -1189,6 +1168,27 @@ func (k *NetworkKubeSpan) Filters() config.KubeSpanFilters {
 // Endpoints implements the config.KubeSpanFilters interface.
 func (k *KubeSpanFilters) Endpoints() []string {
 	return k.KubeSpanFiltersEndpoints
+}
+
+// ExcludeAdvertisedNetworks implements the config.KubeSpanFilters interface.
+func (k *KubeSpanFilters) ExcludeAdvertisedNetworks() []netip.Prefix {
+	if len(k.KubeSpanFiltersExcludeAdvertisedNetworks) == 0 {
+		return nil
+	}
+
+	result := make([]netip.Prefix, 0, len(k.KubeSpanFiltersExcludeAdvertisedNetworks))
+
+	for _, cidrStr := range k.KubeSpanFiltersExcludeAdvertisedNetworks {
+		// prefixes are validated, so for defensive programming, we can ignore errors here.
+		prefix, err := netip.ParsePrefix(cidrStr)
+		if err != nil {
+			continue
+		}
+
+		result = append(result, prefix)
+	}
+
+	return result
 }
 
 // Disabled implements the config.Provider interface.
@@ -1204,6 +1204,13 @@ func (t *TimeConfig) Servers() []string {
 // BootTimeout implements the config.Provider interface.
 func (t *TimeConfig) BootTimeout() time.Duration {
 	return t.TimeBootTimeout
+}
+
+// UseNTS implements the config.Provider interface.
+//
+// Deprecated v1alpha1 TimeConfig does not support NTS.
+func (t *TimeConfig) UseNTS() bool {
+	return false
 }
 
 // Image implements the config.Provider interface.
@@ -1240,7 +1247,8 @@ func (i *InstallConfig) DiskMatchExpression() (*cel.Expression, error) {
 			op = "=="
 		}
 
-		exprs = append(exprs, // disk.size op value
+		exprs = append(
+			exprs, // disk.size op value
 			builder.NewCall(
 				builder.NextID(),
 				"_"+op+"_",
@@ -1309,7 +1317,8 @@ func (i *InstallConfig) DiskMatchExpression() (*cel.Expression, error) {
 	}
 
 	// disk.transport != "" (otherwise it might select e.g. DM devices)
-	exprs = append(exprs,
+	exprs = append(
+		exprs,
 		builder.NewCall(
 			builder.NextID(),
 			operators.NotEquals,
@@ -1335,7 +1344,8 @@ func (i *InstallConfig) DiskMatchExpression() (*cel.Expression, error) {
 				"rotational",
 			))
 		case "ssd": // !disk.rotational
-			exprs = append(exprs,
+			exprs = append(
+				exprs,
 				builder.NewCall(
 					builder.NextID(),
 					operators.LogicalNot,
@@ -1414,6 +1424,9 @@ func (i *InstallConfig) GrubUseUKICmdline() bool {
 func (i InstallExtensionConfig) Image() string {
 	return i.ExtensionImage
 }
+
+// K8sCoreDNSConfigSignal implements config.K8sCoreDNSConfig interface.
+func (c *CoreDNS) K8sCoreDNSConfigSignal() {}
 
 // Enabled implements the config.Provider interface.
 func (c *CoreDNS) Enabled() bool {
@@ -1535,6 +1548,12 @@ func (e *EncryptionConfig) BlockSize() uint64 {
 // Options implements the config.Provider interface.
 func (e *EncryptionConfig) Options() []string {
 	return e.EncryptionPerfOptions
+}
+
+// AllowDiscards implements the config.Provider interface.
+func (e *EncryptionConfig) AllowDiscards() bool {
+	// not supported in v1alpha1
+	return false
 }
 
 // Keys implements the config.Provider interface.

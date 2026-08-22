@@ -6,13 +6,13 @@
 package network_test
 
 import (
+	"crypto/fips140"
 	"net/netip"
 	"net/url"
 	"testing"
 	"time"
 
 	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
-	"github.com/siderolabs/go-pointer"
 	"github.com/siderolabs/go-procfs/procfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -21,9 +21,9 @@ import (
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/ctest"
 	netctrl "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/network"
 	"github.com/siderolabs/talos/pkg/machinery/config/container"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/meta"
 	networkcfg "github.com/siderolabs/talos/pkg/machinery/config/types/network"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
-	"github.com/siderolabs/talos/pkg/machinery/fipsmode"
 	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
@@ -93,7 +93,7 @@ func (suite *LinkConfigSuite) TestMachineConfiguration() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineNetwork: &v1alpha1.NetworkConfig{
+					MachineNetwork: &v1alpha1.NetworkConfig{ //nolint:staticcheck // legacy config
 						NetworkInterfaces: []*v1alpha1.Device{
 							{
 								DeviceInterface: "eth0",
@@ -122,7 +122,7 @@ func (suite *LinkConfigSuite) TestMachineConfiguration() {
 								DeviceMTU:       9001,
 							},
 							{
-								DeviceIgnore:    pointer.To(true),
+								DeviceIgnore:    new(true),
 								DeviceInterface: "eth2",
 								DeviceAddresses: []string{"192.168.0.24/28"},
 							},
@@ -164,7 +164,7 @@ func (suite *LinkConfigSuite) TestMachineConfiguration() {
 								DeviceBridge: &v1alpha1.Bridge{
 									BridgedInterfaces: []string{"eth4", "eth5"},
 									BridgeSTP: &v1alpha1.STP{
-										STPEnabled: pointer.To(false),
+										STPEnabled: new(false),
 									},
 								},
 							},
@@ -176,16 +176,16 @@ func (suite *LinkConfigSuite) TestMachineConfiguration() {
 								DeviceInterface: "br0",
 								DeviceBridge: &v1alpha1.Bridge{
 									BridgeSTP: &v1alpha1.STP{
-										STPEnabled: pointer.To(true),
+										STPEnabled: new(true),
 									},
 									BridgeVLAN: &v1alpha1.BridgeVLAN{
-										BridgeVLANFiltering: pointer.To(true),
+										BridgeVLANFiltering: new(true),
 									},
 								},
 							},
 							{
 								DeviceInterface: "dummy0",
-								DeviceDummy:     pointer.To(true),
+								DeviceDummy:     new(true),
 							},
 							{
 								DeviceInterface: "wireguard0",
@@ -353,7 +353,7 @@ func (suite *LinkConfigSuite) TestMachineConfigurationWithAliases() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineNetwork: &v1alpha1.NetworkConfig{
+					MachineNetwork: &v1alpha1.NetworkConfig{ //nolint:staticcheck // legacy config
 						NetworkInterfaces: []*v1alpha1.Device{
 							{
 								DeviceInterface: "enx0123",
@@ -369,7 +369,7 @@ func (suite *LinkConfigSuite) TestMachineConfigurationWithAliases() {
 								DeviceMTU:       9001,
 							},
 							{
-								DeviceIgnore:    pointer.To(true),
+								DeviceIgnore:    new(true),
 								DeviceInterface: "enx0456",
 							},
 							{
@@ -458,7 +458,7 @@ func (suite *LinkConfigSuite) TestMachineConfigurationWithAliases() {
 				asrt.Equal(network.LinkKindBond, r.TypedSpec().Kind)
 				asrt.Equal(nethelpers.BondModeXOR, r.TypedSpec().BondMaster.Mode)
 				asrt.True(r.TypedSpec().BondMaster.UseCarrier)
-				asrt.Equal(nethelpers.ADLACPActiveOn, r.TypedSpec().BondMaster.ADLACPActive)
+				asrt.Nil(r.TypedSpec().BondMaster.ADLACPActive)
 			}
 		},
 	)
@@ -472,27 +472,27 @@ func (suite *LinkConfigSuite) TestMachineConfigurationNewStyle() {
 
 	dc1 := networkcfg.NewDummyLinkConfigV1Alpha1("dummy1")
 	dc1.HardwareAddressConfig = nethelpers.HardwareAddr{0x02, 0x42, 0xac, 0x11, 0x00, 0x02}
-	dc1.LinkUp = pointer.To(true)
+	dc1.LinkUp = new(true)
 
 	vl1 := networkcfg.NewVLANConfigV1Alpha1("dummy1.100")
 	vl1.VLANIDConfig = 100
 	vl1.ParentLinkConfig = "dummy1"
-	vl1.VLANModeConfig = pointer.To(nethelpers.VLANProtocol8021AD)
+	vl1.VLANModeConfig = new(nethelpers.VLANProtocol8021AD)
 	vl1.LinkMTU = 200
-	vl1.LinkUp = pointer.To(true)
+	vl1.LinkUp = new(true)
 
 	dc2 := networkcfg.NewDummyLinkConfigV1Alpha1("dummy2")
 	dc3 := networkcfg.NewDummyLinkConfigV1Alpha1("dummy3")
 
 	bc1 := networkcfg.NewBondConfigV1Alpha1("bond357")
-	bc1.BondMode = pointer.To(nethelpers.BondModeActiveBackup)
+	bc1.BondMode = new(nethelpers.BondModeActiveBackup)
 	bc1.BondLinks = []string{"dummy2", "dummy3"}
-	bc1.BondUpDelay = pointer.To(uint32(200))
+	bc1.BondUpDelay = new(uint32(200))
 
 	br1 := networkcfg.NewBridgeConfigV1Alpha1("br0")
 	br1.BridgeLinks = []string{"enp0s2", "eth1"}
-	br1.BridgeSTP.BridgeSTPEnabled = pointer.To(true)
-	br1.BridgeVLAN.BridgeVLANFiltering = pointer.To(true)
+	br1.BridgeSTP.BridgeSTPEnabled = new(true)
+	br1.BridgeVLAN.BridgeVLANFiltering = new(true)
 
 	ctr, err := container.New(dc1, lc1, vl1, dc2, dc3, bc1, br1)
 	suite.Require().NoError(err)
@@ -561,7 +561,7 @@ func (suite *LinkConfigSuite) TestMachineConfigurationNewStyle() {
 				asrt.Equal(network.LinkKindBond, r.TypedSpec().Kind)
 				asrt.Equal(nethelpers.BondModeActiveBackup, r.TypedSpec().BondMaster.Mode)
 				asrt.EqualValues(200, r.TypedSpec().BondMaster.UpDelay)
-				asrt.Equal(nethelpers.ADLACPActiveOn, r.TypedSpec().BondMaster.ADLACPActive)
+				asrt.Nil(r.TypedSpec().BondMaster.ADLACPActive)
 			case "br0":
 				asrt.True(r.TypedSpec().Up)
 				asrt.True(r.TypedSpec().Logical)
@@ -574,31 +574,185 @@ func (suite *LinkConfigSuite) TestMachineConfigurationNewStyle() {
 	)
 }
 
-func (suite *LinkConfigSuite) TestMachineConfigurationNewStyleNotFIPS() {
-	if fipsmode.Strict() {
-		suite.T().Skip("skipping test in strict FIPS mode")
-	}
-
+func (suite *LinkConfigSuite) TestMachineConfigurationNewStyleVRF() {
 	suite.Require().NoError(suite.Runtime().RegisterController(&netctrl.LinkConfigController{}))
 
-	privKey, err := wgtypes.GeneratePrivateKey()
+	lc1 := networkcfg.NewLinkConfigV1Alpha1("enp0s2")
+	lc1.LinkMTU = 9001
+
+	dc1 := networkcfg.NewDummyLinkConfigV1Alpha1("dummy1")
+	dc1.HardwareAddressConfig = nethelpers.HardwareAddr{0x02, 0x42, 0xac, 0x11, 0x00, 0x02}
+	dc1.LinkUp = new(true)
+
+	vrf := networkcfg.NewVRFConfigV1Alpha1("vrf-blue")
+	vrf.VRFLinks = []string{"enp0s2", "dummy1"}
+	vrf.VRFTable = nethelpers.RoutingTable(123)
+
+	ctr, err := container.New(lc1, dc1, vrf)
 	suite.Require().NoError(err)
 
-	pskKey, err := wgtypes.GenerateKey()
+	cfg := config.NewMachineConfig(ctr)
+	suite.Create(cfg)
+
+	for _, link := range []struct {
+		name    string
+		aliases []string
+	}{
+		{
+			name:    "eth0",
+			aliases: []string{"enp0s2"},
+		},
+	} {
+		status := network.NewLinkStatus(network.NamespaceName, link.name)
+		status.TypedSpec().AltNames = link.aliases
+
+		suite.Create(status)
+	}
+
+	suite.assertLinks(
+		[]string{
+			"configuration/eth0",
+			"configuration/dummy1",
+			"configuration/vrf-blue",
+		}, func(r *network.LinkSpec, asrt *assert.Assertions) {
+			asrt.Equal(network.ConfigMachineConfiguration, r.TypedSpec().ConfigLayer)
+
+			switch r.TypedSpec().Name {
+			case "eth0":
+				asrt.True(r.TypedSpec().Up)
+				asrt.False(r.TypedSpec().Logical)
+				asrt.EqualValues(9001, r.TypedSpec().MTU)
+				asrt.Equal("vrf-blue", r.TypedSpec().VRFSlave.MasterName)
+			case "dummy1":
+				asrt.True(r.TypedSpec().Up)
+				asrt.True(r.TypedSpec().Logical)
+				asrt.Equal(nethelpers.LinkEther, r.TypedSpec().Type)
+				asrt.Equal("dummy", r.TypedSpec().Kind)
+				asrt.Equal("vrf-blue", r.TypedSpec().VRFSlave.MasterName)
+			case "vrf-blue":
+				asrt.True(r.TypedSpec().Up)
+				asrt.True(r.TypedSpec().Logical)
+				asrt.Equal(nethelpers.LinkEther, r.TypedSpec().Type)
+				asrt.Equal(network.LinkKindVRF, r.TypedSpec().Kind)
+				asrt.Equal(nethelpers.RoutingTable(123), r.TypedSpec().VRFMaster.Table)
+			}
+		},
+	)
+}
+
+func (suite *LinkConfigSuite) TestMachineConfigurationNewStyleVethVRF() {
+	suite.Require().NoError(suite.Runtime().RegisterController(&netctrl.LinkConfigController{}))
+
+	veth := networkcfg.NewVethConfigV1Alpha1("veth-metallb", "veth-router")
+	veth.LinkMTU = 1500
+	veth.VethPeer.LinkMTU = 1400
+
+	vrf := networkcfg.NewVRFConfigV1Alpha1("vrf-metallb")
+	vrf.VRFLinks = []string{"veth-router"}
+	vrf.VRFTable = nethelpers.RoutingTable(88)
+
+	ctr, err := container.New(veth, vrf)
 	suite.Require().NoError(err)
 
-	peerKey, err := wgtypes.GenerateKey()
+	suite.Create(config.NewMachineConfig(ctr))
+
+	suite.assertLinks(
+		[]string{
+			"configuration/veth-metallb",
+			"configuration/veth-router",
+			"configuration/vrf-metallb",
+		}, func(r *network.LinkSpec, asrt *assert.Assertions) {
+			asrt.Equal(network.ConfigMachineConfiguration, r.TypedSpec().ConfigLayer)
+
+			switch r.TypedSpec().Name {
+			case "veth-metallb":
+				asrt.True(r.TypedSpec().Up)
+				asrt.True(r.TypedSpec().Logical)
+				asrt.EqualValues(1500, r.TypedSpec().MTU)
+				asrt.Equal(network.LinkKindVeth, r.TypedSpec().Kind)
+				asrt.Equal("veth-router", r.TypedSpec().Veth.PeerName)
+			case "veth-router":
+				asrt.True(r.TypedSpec().Up)
+				asrt.True(r.TypedSpec().Logical)
+				asrt.EqualValues(1400, r.TypedSpec().MTU)
+				asrt.Equal(network.LinkKindVeth, r.TypedSpec().Kind)
+				asrt.Equal("veth-metallb", r.TypedSpec().Veth.PeerName)
+				asrt.Equal("vrf-metallb", r.TypedSpec().VRFSlave.MasterName)
+			case "vrf-metallb":
+				asrt.True(r.TypedSpec().Up)
+				asrt.True(r.TypedSpec().Logical)
+				asrt.Equal(network.LinkKindVRF, r.TypedSpec().Kind)
+				asrt.Equal(nethelpers.RoutingTable(88), r.TypedSpec().VRFMaster.Table)
+			}
+		},
+	)
+}
+
+func (suite *LinkConfigSuite) TestMachineConfigurationNewStyleVethNamesAreLiteral() {
+	suite.Require().NoError(suite.Runtime().RegisterController(&netctrl.LinkConfigController{}))
+
+	nameStatus := network.NewLinkStatus(network.NamespaceName, "eth0")
+	nameStatus.TypedSpec().Alias = "veth-host"
+	suite.Create(nameStatus)
+
+	peerStatus := network.NewLinkStatus(network.NamespaceName, "eth1")
+	peerStatus.TypedSpec().AltNames = []string{"veth-router"}
+	suite.Create(peerStatus)
+
+	veth := networkcfg.NewVethConfigV1Alpha1("veth-host", "veth-router")
+	ctr, err := container.New(veth)
 	suite.Require().NoError(err)
+
+	suite.Create(config.NewMachineConfig(ctr))
+
+	suite.assertLinks(
+		[]string{
+			"configuration/veth-host",
+			"configuration/veth-router",
+		}, func(r *network.LinkSpec, asrt *assert.Assertions) {
+			asrt.True(r.TypedSpec().Logical)
+			asrt.Equal(network.LinkKindVeth, r.TypedSpec().Kind)
+
+			if r.TypedSpec().Name == "veth-host" {
+				asrt.Equal("veth-router", r.TypedSpec().Veth.PeerName)
+			} else {
+				asrt.Equal("veth-host", r.TypedSpec().Veth.PeerName)
+			}
+		},
+	)
+}
+
+func (suite *LinkConfigSuite) TestMachineConfigurationNewStyleNotFIPS() {
+	suite.Require().NoError(suite.Runtime().RegisterController(&netctrl.LinkConfigController{}))
+
+	var (
+		privKey, pskKey, peerKey wgtypes.Key
+		peerKeyPub               wgtypes.Key
+		err                      error
+	)
+
+	fips140.WithoutEnforcement(func() {
+		privKey, err = wgtypes.GeneratePrivateKey()
+		suite.Require().NoError(err)
+
+		pskKey, err = wgtypes.GenerateKey()
+		suite.Require().NoError(err)
+
+		peerKey, err = wgtypes.GenerateKey()
+		suite.Require().NoError(err)
+
+		peerKeyPub = peerKey.PublicKey()
+	})
 
 	wc1 := networkcfg.NewWireguardConfigV1Alpha1("wg0")
-	wc1.LinkUp = pointer.To(true)
+	wc1.LinkUp = new(true)
 	wc1.WireguardPrivateKey = privKey.String()
 	wc1.WireguardListenPort = 12345
 	wc1.WireguardPeers = []networkcfg.WireguardPeer{
 		{
-			WireguardPublicKey:    peerKey.PublicKey().String(),
+			WireguardPublicKey:    peerKeyPub.String(),
 			WireguardPresharedKey: pskKey.String(),
-			WireguardAllowedIPs:   []networkcfg.Prefix{{Prefix: netip.MustParsePrefix("10.0.0.0/24")}},
+			WireguardAllowedIPs:   []meta.Prefix{{Prefix: netip.MustParsePrefix("10.0.0.0/24")}},
 		},
 	}
 
@@ -625,7 +779,7 @@ func (suite *LinkConfigSuite) TestMachineConfigurationNewStyleNotFIPS() {
 					FirewallMark: 0,
 					Peers: []network.WireguardPeer{
 						{
-							PublicKey:    peerKey.PublicKey().String(),
+							PublicKey:    peerKeyPub.String(),
 							PresharedKey: pskKey.String(),
 							AllowedIPs: []netip.Prefix{
 								netip.MustParsePrefix("10.0.0.0/24"),
@@ -668,7 +822,7 @@ func (suite *LinkConfigSuite) TestDefaultUp() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineNetwork: &v1alpha1.NetworkConfig{
+					MachineNetwork: &v1alpha1.NetworkConfig{ //nolint:staticcheck // legacy config
 						NetworkInterfaces: []*v1alpha1.Device{
 							{
 								DeviceInterface: "eth0",
@@ -787,9 +941,9 @@ func (suite *LinkConfigSuite) TestMulticast() {
 	suite.Require().NoError(suite.Runtime().RegisterController(&netctrl.LinkConfigController{}))
 
 	lc1 := networkcfg.NewLinkConfigV1Alpha1("enp1s1")
-	lc1.LinkMulticast = pointer.To(false)
+	lc1.LinkMulticast = new(false)
 	lc2 := networkcfg.NewLinkConfigV1Alpha1("enp1s2")
-	lc2.LinkMulticast = pointer.To(true)
+	lc2.LinkMulticast = new(true)
 
 	ctr, err := container.New(lc1, lc2)
 	suite.Require().NoError(err)

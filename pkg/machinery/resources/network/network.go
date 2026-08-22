@@ -16,6 +16,8 @@ import (
 
 //go:generate go tool github.com/dmarkham/enumer -type=ConfigLayer,Operator -linecomment -text
 
+//go:generate go tool github.com/siderolabs/talos/tools/redactgen -header-file ../../../../hack/boilerplate.txt -o redact.generated.go .
+
 // NamespaceName contains resources related to networking.
 const NamespaceName resource.Namespace = "network"
 
@@ -55,6 +57,11 @@ func RouteID(table nethelpers.RoutingTable, family nethelpers.Family, destinatio
 	return fmt.Sprintf("%s%s/%s/%s/%d", prefix, family, string(gw), string(dst), priority)
 }
 
+// RoutingRuleID builds ID (primary key) for the routing rule.
+func RoutingRuleID(family nethelpers.Family, priority uint32) string {
+	return fmt.Sprintf("%s/%05d", family, priority)
+}
+
 // OperatorID builds ID (primary key) for the operators.
 func OperatorID(spec OperatorSpecSpec) string {
 	switch spec.Operator {
@@ -79,5 +86,7 @@ const (
 	LinkKindVLAN      = "vlan"
 	LinkKindBond      = "bond"
 	LinkKindBridge    = "bridge"
+	LinkKindVRF       = "vrf"
+	LinkKindVeth      = "veth"
 	LinkKindWireguard = "wireguard"
 )

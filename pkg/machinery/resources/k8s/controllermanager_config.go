@@ -20,6 +20,9 @@ const ControllerManagerConfigType = resource.Type("ControllerManagerConfigs.kube
 // ControllerManagerConfigID is a singleton resource ID for ControllerManagerConfig.
 const ControllerManagerConfigID = resource.ID(ControllerManagerID)
 
+// FinalControllerManagerConfigID is a singleton resource ID for the final ControllerManagerConfig.
+const FinalControllerManagerConfigID = resource.ID(FinalPrefix + ControllerManagerID)
+
 // ControllerManagerConfig represents configuration for kube-controller-manager.
 type ControllerManagerConfig = typed.Resource[ControllerManagerConfigSpec, ControllerManagerConfigExtension]
 
@@ -27,22 +30,26 @@ type ControllerManagerConfig = typed.Resource[ControllerManagerConfigSpec, Contr
 //
 //gotagsrewrite:gen
 type ControllerManagerConfigSpec struct {
-	Enabled              bool              `yaml:"enabled" protobuf:"1"`
-	Image                string            `yaml:"image" protobuf:"2"`
-	CloudProvider        string            `yaml:"cloudProvider" protobuf:"3"`
-	PodCIDRs             []string          `yaml:"podCIDRs" protobuf:"4"`
-	ServiceCIDRs         []string          `yaml:"serviceCIDRs" protobuf:"5"`
-	ExtraArgs            map[string]string `yaml:"extraArgs" protobuf:"6"`
-	ExtraVolumes         []ExtraVolume     `yaml:"extraVolumes" protobuf:"7"`
-	EnvironmentVariables map[string]string `yaml:"environmentVariables" protobuf:"8"`
-	Resources            Resources         `yaml:"resources" protobuf:"9"`
+	Enabled              bool                 `yaml:"enabled" protobuf:"1"`
+	Image                string               `yaml:"image" protobuf:"2"`
+	CloudProvider        string               `yaml:"cloudProvider" protobuf:"3"`
+	PodCIDRs             []string             `yaml:"podCIDRs" protobuf:"4"`
+	ServiceCIDRs         []string             `yaml:"serviceCIDRs" protobuf:"5"`
+	ExtraArgs            map[string]ArgValues `yaml:"extraArgs,omitempty" protobuf:"10"`
+	Args                 []string             `yaml:"args,omitempty" protobuf:"11"`
+	ExtraVolumes         []ExtraVolume        `yaml:"extraVolumes" protobuf:"7"`
+	EnvironmentVariables map[string]string    `yaml:"environmentVariables" protobuf:"8"`
+	Resources            Resources            `yaml:"resources" protobuf:"9"`
+	NodeCIDRMaskSizeIPv4 int                  `yaml:"nodeCIDRMaskSizeIPv4" protobuf:"12"`
+	NodeCIDRMaskSizeIPv6 int                  `yaml:"nodeCIDRMaskSizeIPv6" protobuf:"13"`
 }
 
 // NewControllerManagerConfig returns new ControllerManagerConfig resource.
-func NewControllerManagerConfig() *ControllerManagerConfig {
+func NewControllerManagerConfig(id resource.ID) *ControllerManagerConfig {
 	return typed.NewResource[ControllerManagerConfigSpec, ControllerManagerConfigExtension](
-		resource.NewMetadata(ControlPlaneNamespaceName, ControllerManagerConfigType, ControllerManagerConfigID, resource.VersionUndefined),
-		ControllerManagerConfigSpec{})
+		resource.NewMetadata(ControlPlaneNamespaceName, ControllerManagerConfigType, id, resource.VersionUndefined),
+		ControllerManagerConfigSpec{},
+	)
 }
 
 // ControllerManagerConfigExtension defines ControllerManagerConfig resource definition.

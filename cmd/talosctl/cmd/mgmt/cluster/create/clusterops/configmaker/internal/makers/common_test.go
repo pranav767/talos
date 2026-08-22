@@ -15,9 +15,11 @@ import (
 	"github.com/siderolabs/talos/cmd/talosctl/cmd/mgmt/cluster/create/clusterops/configmaker/internal/makers"
 	"github.com/siderolabs/talos/pkg/machinery/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/bundle"
+	"github.com/siderolabs/talos/pkg/machinery/config/configpatcher"
 	"github.com/siderolabs/talos/pkg/machinery/config/encoder"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
+	"github.com/siderolabs/talos/pkg/machinery/version"
 	"github.com/siderolabs/talos/pkg/provision"
 )
 
@@ -144,23 +146,26 @@ func TestCommonMaker_MachineConfig(t *testing.T) {
 	cOps := clusterops.GetCommon()
 	m := getInitializedTestMaker(t, cOps)
 
-	assertConfigDefaultness(t, cOps, m)
+	assertConfigDefaultness(t, cOps, m, nil)
 }
 
 // assertConfigDefaultness makes sure the maker-generated machine configs are not different from default talos machine configs.
-func assertConfigDefaultness[ExtraOps any](t *testing.T, cOps clusterops.Common, m makers.Maker[ExtraOps], desiredExtraGenOps ...generate.Option) {
-	var versionContract *config.VersionContract
+func assertConfigDefaultness[ExtraOps any](t *testing.T, cOps clusterops.Common, m makers.Maker[ExtraOps], desiredExtraGenOps []generate.Option, extraPatches ...configpatcher.Patch) {
+	versionContract, err := config.ParseContractFromVersion(version.Tag)
+	require.NoError(t, err)
 
 	secretsBundle, err := secrets.NewBundle(secrets.NewClock(), versionContract)
 	require.NoError(t, err)
 
 	// The only allowed differences from the default machine config.
-	desiredExtraGenOps = append(desiredExtraGenOps,
+	desiredExtraGenOps = append(
+		desiredExtraGenOps,
 		generate.WithSecretsBundle(secretsBundle),
 		generate.WithVersionContract(versionContract),
 	)
 
-	in, err := generate.NewInput(cOps.RootOps.ClusterName, "controlplane-endpoint.test", cOps.KubernetesVersion,
+	in, err := generate.NewInput(
+		cOps.RootOps.ClusterName, "controlplane-endpoint.test", cOps.KubernetesVersion,
 		desiredExtraGenOps...,
 	)
 	require.NoError(t, err)
@@ -171,13 +176,21 @@ func assertConfigDefaultness[ExtraOps any](t *testing.T, cOps clusterops.Common,
 	require.NoError(t, err)
 
 	for _, node := range clusterCfgs.ClusterRequest.Nodes {
-		assertMachineConfig(t, in, node)
+		assertMachineConfig(t, in, node, extraPatches...)
 	}
 }
 
-func assertMachineConfig(t *testing.T, in *generate.Input, node provision.NodeRequest) {
+func assertMachineConfig(t *testing.T, in *generate.Input, node provision.NodeRequest, extraPatches ...configpatcher.Patch) {
 	cfgExpected, err := in.Config(node.Type)
 	require.NoError(t, err)
+
+	if len(extraPatches) > 0 {
+		patched, err := configpatcher.Apply(configpatcher.WithConfig(cfgExpected), extraPatches)
+		require.NoError(t, err)
+
+		cfgExpected, err = patched.Config()
+		require.NoError(t, err)
+	}
 
 	cfgGot := node.Config
 

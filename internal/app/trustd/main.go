@@ -70,7 +70,6 @@ func trustdMain() error {
 	runtimeConn, err := grpc.NewClient(
 		"unix://"+constants.TrustdRuntimeSocketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithSharedWriteBuffer(true),
 		grpc.WithNoProxy(),
 	)
 	if err != nil {
@@ -104,6 +103,7 @@ func trustdMain() error {
 		&reg.Registrator{Resources: resources},
 		factory.WithDefaultLog(),
 		factory.WithUnaryInterceptor(creds.UnaryInterceptor()),
+		factory.WithStreamInterceptor(creds.StreamInterceptor()),
 		factory.ServerOptions(
 			grpc.Creds(
 				credentials.NewTLS(serverTLSConfig),

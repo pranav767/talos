@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/siderolabs/gen/xslices"
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -50,7 +49,7 @@ func TestUserVolumeTransformer(t *testing.T) {
 						MetaAPIVersion: "v1alpha1",
 					},
 					MetaName:   "foo",
-					VolumeType: pointer.To(block.VolumeTypePartition),
+					VolumeType: new(block.VolumeTypePartition),
 					FilesystemSpec: blockcfg.FilesystemSpec{
 						FilesystemType: block.FilesystemTypeXFS,
 					},
@@ -76,8 +75,9 @@ func TestUserVolumeTransformer(t *testing.T) {
 				})
 
 				testMountTransformFunc(t, resources[0].MountTransformFunc, func(t *testing.T, m *block.VolumeMountRequest, err error) {
-					// default mount transform is noop
 					require.NoError(t, err)
+					assert.True(t, m.TypedSpec().Secure)
+					assert.True(t, m.TypedSpec().NoExec)
 				})
 			},
 		},
@@ -89,7 +89,7 @@ func TestUserVolumeTransformer(t *testing.T) {
 					MetaAPIVersion: "v1alpha1",
 				},
 				MetaName:   "bar",
-				VolumeType: pointer.To(block.VolumeTypeDirectory),
+				VolumeType: new(block.VolumeTypeDirectory),
 				FilesystemSpec: blockcfg.FilesystemSpec{
 					FilesystemType: block.FilesystemTypeXFS,
 				},
@@ -110,7 +110,7 @@ func TestUserVolumeTransformer(t *testing.T) {
 
 					assert.Equal(t, "bar", vc.TypedSpec().Mount.TargetPath)
 					assert.Equal(t, constants.UserVolumeMountPoint, vc.TypedSpec().Mount.ParentID)
-					assert.Equal(t, pointer.To("bar"), vc.TypedSpec().Mount.BindTarget)
+					assert.Equal(t, new("bar"), vc.TypedSpec().Mount.BindTarget)
 					assert.Equal(t, fs.FileMode(0o755), vc.TypedSpec().Mount.FileMode)
 				})
 
@@ -127,7 +127,7 @@ func TestUserVolumeTransformer(t *testing.T) {
 					MetaKind:       blockcfg.UserVolumeConfigKind,
 					MetaAPIVersion: "v1alpha1",
 				},
-				VolumeType: pointer.To(block.VolumeTypeTmpfs),
+				VolumeType: new(block.VolumeTypeTmpfs),
 			}},
 			checkFunc: func(t *testing.T, resources []volumeconfig.VolumeResource, err error) {
 				require.Error(t, err)
@@ -144,7 +144,7 @@ func TestUserVolumeTransformer(t *testing.T) {
 					MetaAPIVersion: "v1alpha1",
 				},
 				MetaName:   "foo",
-				VolumeType: pointer.To(block.VolumeTypePartition),
+				VolumeType: new(block.VolumeTypePartition),
 				FilesystemSpec: blockcfg.FilesystemSpec{
 					FilesystemType: block.FilesystemTypeXFS,
 				},
@@ -154,7 +154,7 @@ func TestUserVolumeTransformer(t *testing.T) {
 					MetaAPIVersion: "v1alpha1",
 				},
 				MetaName:   "bar",
-				VolumeType: pointer.To(block.VolumeTypeDirectory),
+				VolumeType: new(block.VolumeTypeDirectory),
 				FilesystemSpec: blockcfg.FilesystemSpec{
 					FilesystemType: block.FilesystemTypeXFS,
 				},
@@ -272,8 +272,8 @@ func TestExistingVolumeTransformer(t *testing.T) {
 							Match: cel.MustExpression(cel.ParseBooleanExpression(`volume.partition_label == "MY-DATA"`, celenv.VolumeLocator())),
 						},
 					},
-					MountSpec: blockcfg.MountSpec{
-						MountReadOnly: pointer.To(false),
+					MountSpec: blockcfg.ExistingMountSpec{
+						MountReadOnly: new(false),
 					},
 				},
 			},
@@ -297,6 +297,8 @@ func TestExistingVolumeTransformer(t *testing.T) {
 					require.NoError(t, err)
 
 					assert.False(t, m.TypedSpec().ReadOnly, "expected read-write mount")
+					assert.True(t, m.TypedSpec().Secure)
+					assert.True(t, m.TypedSpec().NoExec)
 				})
 			},
 		},
@@ -314,8 +316,8 @@ func TestExistingVolumeTransformer(t *testing.T) {
 							Match: cel.MustExpression(cel.ParseBooleanExpression(`volume.partition_label == "READONLY-DATA"`, celenv.VolumeLocator())),
 						},
 					},
-					MountSpec: blockcfg.MountSpec{
-						MountReadOnly: pointer.To(true),
+					MountSpec: blockcfg.ExistingMountSpec{
+						MountReadOnly: new(true),
 					},
 				},
 			},
@@ -326,6 +328,8 @@ func TestExistingVolumeTransformer(t *testing.T) {
 					require.NoError(t, err)
 
 					assert.True(t, m.TypedSpec().ReadOnly, "expected read-only mount")
+					assert.True(t, m.TypedSpec().Secure)
+					assert.True(t, m.TypedSpec().NoExec)
 				})
 			},
 		},
@@ -373,7 +377,7 @@ func TestExternalVolumeTransformer(t *testing.T) {
 					MetaName:       "external-data",
 					FilesystemType: block.FilesystemTypeVirtiofs,
 					MountSpec: blockcfg.ExternalMountSpec{
-						MountReadOnly: pointer.To(false),
+						MountReadOnly: new(false),
 						MountVirtiofs: &blockcfg.VirtiofsMountSpec{
 							VirtiofsTag: "data",
 						},
@@ -401,6 +405,8 @@ func TestExternalVolumeTransformer(t *testing.T) {
 					require.NoError(t, err)
 
 					assert.False(t, m.TypedSpec().ReadOnly, "expected read-write mount")
+					assert.True(t, m.TypedSpec().Secure)
+					assert.True(t, m.TypedSpec().NoExec)
 				})
 			},
 		},
@@ -415,7 +421,7 @@ func TestExternalVolumeTransformer(t *testing.T) {
 					MetaName:       "external-data",
 					FilesystemType: block.FilesystemTypeVirtiofs,
 					MountSpec: blockcfg.ExternalMountSpec{
-						MountReadOnly: pointer.To(true),
+						MountReadOnly: new(true),
 						MountVirtiofs: &blockcfg.VirtiofsMountSpec{
 							VirtiofsTag: "data",
 						},
@@ -443,6 +449,8 @@ func TestExternalVolumeTransformer(t *testing.T) {
 					require.NoError(t, err)
 
 					assert.True(t, m.TypedSpec().ReadOnly, "expected read-write mount")
+					assert.True(t, m.TypedSpec().Secure)
+					assert.True(t, m.TypedSpec().NoExec)
 				})
 			},
 		},
@@ -504,6 +512,49 @@ func TestSwapVolumeTransformer(t *testing.T) {
 					assert.Equal(t, block.FilesystemTypeSwap, vc.TypedSpec().Provisioning.FilesystemSpec.Type)
 					assert.Equal(t, constants.SwapVolumePrefix+"swap1", vc.TypedSpec().Provisioning.PartitionSpec.Label)
 					assert.Equal(t, block.WaveUserVolumes, vc.TypedSpec().Provisioning.Wave)
+
+					assert.EqualValues(t, volumeconfig.MinUserVolumeSize, vc.TypedSpec().Provisioning.PartitionSpec.MinSize)
+					assert.EqualValues(t, 0, vc.TypedSpec().Provisioning.PartitionSpec.MaxSize)
+				})
+
+				testMountTransformFunc(t, resources[0].MountTransformFunc, func(t *testing.T, m *block.VolumeMountRequest, err error) {
+					// default mount transform is noop
+					require.NoError(t, err)
+				})
+			},
+		},
+		{
+			name: "swap volume with sizes",
+			cfg: []*blockcfg.SwapVolumeConfigV1Alpha1{
+				{
+					Meta: meta.Meta{
+						MetaKind:       blockcfg.SwapVolumeConfigKind,
+						MetaAPIVersion: "v1alpha1",
+					},
+					MetaName: "swap1",
+					ProvisioningSpec: blockcfg.ProvisioningSpec{
+						ProvisioningMinSize: blockcfg.MustByteSize("1GB"),
+						ProvisioningMaxSize: blockcfg.MustSize("2GB"),
+					},
+				},
+			},
+			checkFunc: func(t *testing.T, resources []volumeconfig.VolumeResource) {
+				require.Len(t, resources, 1)
+
+				assert.Equal(t, constants.SwapVolumePrefix+"swap1", resources[0].VolumeID)
+				assert.Equal(t, block.SwapVolumeLabel, resources[0].Label)
+
+				testTransformFunc(t, resources[0].TransformFunc, func(t *testing.T, vc *block.VolumeConfig, err error) {
+					require.NoError(t, err)
+
+					assert.Equal(t, block.VolumeTypePartition, vc.TypedSpec().Type)
+
+					assert.Equal(t, block.FilesystemTypeSwap, vc.TypedSpec().Provisioning.FilesystemSpec.Type)
+					assert.Equal(t, constants.SwapVolumePrefix+"swap1", vc.TypedSpec().Provisioning.PartitionSpec.Label)
+					assert.Equal(t, block.WaveUserVolumes, vc.TypedSpec().Provisioning.Wave)
+
+					assert.EqualValues(t, 1*1000*1000*1000, vc.TypedSpec().Provisioning.PartitionSpec.MinSize)
+					assert.EqualValues(t, 2*1000*1000*1000, vc.TypedSpec().Provisioning.PartitionSpec.MaxSize)
 				})
 
 				testMountTransformFunc(t, resources[0].MountTransformFunc, func(t *testing.T, m *block.VolumeMountRequest, err error) {

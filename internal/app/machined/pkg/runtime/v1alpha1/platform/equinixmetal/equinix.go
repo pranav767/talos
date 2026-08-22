@@ -225,7 +225,7 @@ func (p *EquinixMetal) ParseMetadata(ctx context.Context, equinixMetadata *Metad
 		}
 
 		if bondMode == nethelpers.BondMode8023AD {
-			bondLink.BondMaster.ADLACPActive = nethelpers.ADLACPActiveOn
+			bondLink.BondMaster.ADLACPActive = new(nethelpers.ADLACPActiveOn)
 		}
 
 		networkadapter.BondMasterSpec(&bondLink.BondMaster).FillDefaults()
@@ -256,7 +256,8 @@ func (p *EquinixMetal) ParseMetadata(ctx context.Context, equinixMetadata *Metad
 			family = nethelpers.FamilyInet6
 		}
 
-		networkConfig.Addresses = append(networkConfig.Addresses,
+		networkConfig.Addresses = append(
+			networkConfig.Addresses,
 			network.AddressSpecSpec{
 				ConfigLayer: network.ConfigPlatform,
 				LinkName:    firstBond,

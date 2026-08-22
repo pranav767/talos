@@ -5,24 +5,15 @@
 package files_test
 
 import (
-	"context"
 	"os"
-	"path/filepath"
-	"strconv"
-	"sync"
 	"testing"
 	"time"
 
-	osruntime "github.com/cosi-project/runtime/pkg/controller/runtime"
-	"github.com/cosi-project/runtime/pkg/resource"
-	"github.com/cosi-project/runtime/pkg/safe"
-	"github.com/cosi-project/runtime/pkg/state"
-	"github.com/cosi-project/runtime/pkg/state/impl/inmem"
-	"github.com/cosi-project/runtime/pkg/state/impl/namespaced"
-	"github.com/siderolabs/go-retry/retry"
+	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
-	"go.uber.org/zap/zaptest"
 
+	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/ctest"
 	filesctrl "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/files"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/runtime"
 	"github.com/siderolabs/talos/pkg/machinery/resources/files"
@@ -31,110 +22,9 @@ import (
 )
 
 type EtcFileSuite struct {
-	suite.Suite
+	ctest.DefaultSuite
 
-	state state.State
-
-	runtime *osruntime.Runtime
-	wg      sync.WaitGroup
-
-	ctx       context.Context //nolint:containedctx
-	ctxCancel context.CancelFunc
-
-	etcPath string
 	etcRoot xfs.Root
-}
-
-func (suite *EtcFileSuite) SetupTest() {
-	suite.ctx, suite.ctxCancel = context.WithTimeout(context.Background(), 3*time.Minute)
-
-	suite.state = state.WrapCore(namespaced.NewState(inmem.Build))
-
-	var err error
-
-	suite.runtime, err = osruntime.NewRuntime(suite.state, zaptest.NewLogger(suite.T()))
-	suite.Require().NoError(err)
-
-	suite.startRuntime()
-
-	ok, err := runtime.KernelCapabilities().OpentreeOnAnonymousFS()
-	suite.Require().NoError(err)
-
-	suite.etcPath = suite.T().TempDir()
-
-	if ok {
-		suite.etcRoot = &xfs.UnixRoot{FS: opentree.NewFromPath(suite.T().TempDir())}
-	} else {
-		suite.etcRoot = &xfs.OSRoot{Shadow: suite.T().TempDir()}
-	}
-
-	suite.Require().NoError(suite.etcRoot.OpenFS())
-
-	suite.Require().NoError(
-		suite.runtime.RegisterController(
-			&filesctrl.EtcFileController{
-				EtcPath: suite.etcPath,
-				EtcRoot: suite.etcRoot,
-			},
-		),
-	)
-}
-
-func (suite *EtcFileSuite) startRuntime() {
-	suite.wg.Go(func() {
-		suite.Assert().NoError(suite.runtime.Run(suite.ctx))
-	})
-}
-
-func (suite *EtcFileSuite) assertFileContents(root xfs.Root, filename, contents string) error {
-	rwb, err := xfs.ReadFile(root, filename)
-	if err != nil {
-		return retry.ExpectedError(err)
-	}
-
-	if string(rwb) != contents {
-		return retry.ExpectedErrorf("contents for RW file %q don't match %q != %q", filename, string(rwb), contents)
-	}
-
-	rob, err := os.ReadFile(filepath.Join(suite.etcPath, filename))
-	if err != nil {
-		return retry.ExpectedError(err)
-	}
-
-	if string(rob) != contents {
-		return retry.ExpectedErrorf("contents for RO file %q don't match %q != %q", filepath.Join(suite.etcPath, filename), string(rob), contents)
-	}
-
-	return nil
-}
-
-func (suite *EtcFileSuite) assertEtcFile(filename, contents string, expectedVersion resource.Version) error {
-	if err := suite.assertFileContents(suite.etcRoot, filename, contents); err != nil {
-		return err // Already wrapped in the retry.ExpectedError
-	}
-
-	r, err := safe.ReaderGet[*files.EtcFileStatus](suite.ctx, suite.state, resource.NewMetadata(files.NamespaceName, files.EtcFileStatusType, filename, resource.VersionUndefined))
-	if err != nil {
-		if state.IsNotFoundError(err) {
-			return retry.ExpectedError(err)
-		}
-
-		return err
-	}
-
-	version := r.TypedSpec().SpecVersion
-
-	expected, err := strconv.Atoi(expectedVersion.String())
-	suite.Require().NoError(err)
-
-	ver, err := strconv.Atoi(version)
-	suite.Require().NoError(err)
-
-	if ver < expected {
-		return retry.ExpectedErrorf("version mismatch %s > %s", expectedVersion, version)
-	}
-
-	return nil
 }
 
 func (suite *EtcFileSuite) TestFiles() {
@@ -142,48 +32,54 @@ func (suite *EtcFileSuite) TestFiles() {
 	etcFileSpec.TypedSpec().Contents = []byte("foo")
 	etcFileSpec.TypedSpec().Mode = 0o644
 
-	// create "read-only" mock (in Talos it's part of rootfs)
-	suite.T().Logf("mock created %q", filepath.Join(suite.etcPath, etcFileSpec.Metadata().ID()))
-	suite.Require().NoError(os.WriteFile(filepath.Join(suite.etcPath, etcFileSpec.Metadata().ID()), nil, 0o644))
+	suite.Create(etcFileSpec)
 
-	suite.Require().NoError(suite.state.Create(suite.ctx, etcFileSpec))
+	// controller should put a finalizer on the spec, bumping the version
+	expectedVersion := etcFileSpec.Metadata().Version().Next()
 
-	suite.Assert().NoError(
-		retry.Constant(5*time.Second, retry.WithUnits(100*time.Millisecond)).Retry(
-			func() error {
-				return suite.assertEtcFile("test1", "foo", etcFileSpec.Metadata().Version())
-			},
-		),
-	)
+	// the controller writes into the managed xfs root
+	// final /etc is read-only through the composed overlay.
+	ctest.AssertResource(suite, "test1", func(r *files.EtcFileStatus, asrt *assert.Assertions) {
+		asrt.Equal(expectedVersion.String(), r.TypedSpec().SpecVersion)
 
-	for _, r := range []resource.Resource{etcFileSpec} {
-		for {
-			ready, err := suite.state.Teardown(suite.ctx, r.Metadata())
-			suite.Require().NoError(err)
+		rwb, err := xfs.ReadFile(suite.etcRoot, "test1")
+		asrt.NoError(err)
+		asrt.Equal("foo", string(rwb))
+	})
 
-			if ready {
-				break
-			}
-
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-}
-
-func (suite *EtcFileSuite) TearDownTest() {
-	suite.T().Log("tear down")
-
-	suite.ctxCancel()
-
-	suite.wg.Wait()
-
-	suite.etcRoot.Close() //nolint:errcheck
+	rtestutils.Destroy[*files.EtcFileSpec](suite.Ctx(), suite.T(), suite.State(), []string{etcFileSpec.Metadata().ID()})
 }
 
 func TestEtcFileSuite(t *testing.T) {
+	t.Parallel()
+
 	if os.Geteuid() != 0 {
 		t.Skip("requires root")
 	}
 
-	suite.Run(t, new(EtcFileSuite))
+	etcSuite := &EtcFileSuite{}
+	etcSuite.DefaultSuite = ctest.DefaultSuite{
+		Timeout: 10 * time.Second,
+		AfterSetup: func(s *ctest.DefaultSuite) {
+			ok, err := runtime.KernelCapabilities().OpentreeOnAnonymousFS()
+			s.Require().NoError(err)
+
+			if ok {
+				etcSuite.etcRoot = &xfs.UnixRoot{FS: opentree.NewFromPath(s.T().TempDir())}
+			} else {
+				etcSuite.etcRoot = &xfs.OSRoot{Shadow: s.T().TempDir()}
+			}
+
+			s.Require().NoError(etcSuite.etcRoot.OpenFS())
+
+			s.Require().NoError(s.Runtime().RegisterController(&filesctrl.EtcFileController{
+				EtcRoot: etcSuite.etcRoot,
+			}))
+		},
+		AfterTearDown: func(*ctest.DefaultSuite) {
+			etcSuite.etcRoot.Close() //nolint:errcheck
+		},
+	}
+
+	suite.Run(t, etcSuite)
 }

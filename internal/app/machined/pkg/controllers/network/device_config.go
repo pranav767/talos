@@ -175,7 +175,7 @@ func (ctrl *DeviceConfigController) getDevicesBySelector(device talosconfig.Devi
 }
 
 func (ctrl *DeviceConfigController) expandBondSelector(device *v1alpha1.Device, links safe.List[*network.LinkStatus]) error {
-	var matches []*network.LinkStatus
+	matches := make([]*network.LinkStatus, 0, len(device.Bond().Selectors()))
 
 	for _, selector := range device.Bond().Selectors() {
 		matches = append(matches,
@@ -184,14 +184,17 @@ func (ctrl *DeviceConfigController) expandBondSelector(device *v1alpha1.Device, 
 				ctrl.selectDevices(selector, links),
 				func(link *network.LinkStatus) bool {
 					return link.Metadata().ID() != device.Interface()
-				})...)
+				},
+			)...)
 	}
 
 	device.DeviceBond.BondInterfaces = xslices.Map(matches, func(link *network.LinkStatus) string { return link.Metadata().ID() })
 
 	if len(device.DeviceBond.BondInterfaces) == 0 {
-		return fmt.Errorf("no matching network device for defined bond selectors: %v",
-			xslices.Map(device.Bond().Selectors(),
+		return fmt.Errorf(
+			"no matching network device for defined bond selectors: %v",
+			xslices.Map(
+				device.Bond().Selectors(),
 				func(selector talosconfig.NetworkDeviceSelector) string {
 					return fmt.Sprintf("%+v", selector)
 				},

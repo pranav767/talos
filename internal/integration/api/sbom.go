@@ -52,10 +52,13 @@ func (suite *SBOMSuite) TestCommon() {
 	node := suite.RandomDiscoveredNodeInternalIP()
 	ctx := client.WithNode(suite.ctx, node)
 
-	rtestutils.AssertResources(ctx, suite.T(), suite.Client.COSI,
+	versionName := strings.ToLower(strings.ReplaceAll(version.Name, " ", "-"))
+
+	rtestutils.AssertResources(
+		ctx, suite.T(), suite.Client.COSI,
 		[]resource.ID{
 			// list of common SBOM items which should be present always
-			"Talos",
+			versionName,
 			"github.com/siderolabs/go-kubernetes",
 		},
 		func(item *runtime.SBOMItem, asrt *assert.Assertions) {
@@ -65,22 +68,25 @@ func (suite *SBOMSuite) TestCommon() {
 	)
 
 	// Talos SBOM item should have a matching version.
-	rtestutils.AssertResource(ctx, suite.T(), suite.Client.COSI,
-		"Talos",
+	rtestutils.AssertResource(
+		ctx, suite.T(), suite.Client.COSI,
+		versionName,
 		func(item *runtime.SBOMItem, asrt *assert.Assertions) {
-			asrt.Equal(version.Name, item.TypedSpec().Name, "SBOM item name should match Talos version name")
-			// asrt.Equal(version.Tag, item.TypedSpec().Version, "SBOM item version should match Talos version")
+			asrt.Equal(versionName, item.TypedSpec().Name, "SBOM item name should match Talos version name")
+			asrt.Equal(suite.Version, item.TypedSpec().Version, "SBOM item version should match Talos version")
 		},
 	)
 
 	// Assert on containerd/runc versions.
-	rtestutils.AssertResource(ctx, suite.T(), suite.Client.COSI,
+	rtestutils.AssertResource(
+		ctx, suite.T(), suite.Client.COSI,
 		"containerd",
 		func(item *runtime.SBOMItem, asrt *assert.Assertions) {
 			asrt.Equal("v"+constants.DefaultContainerdVersion, item.TypedSpec().Version)
 		},
 	)
-	rtestutils.AssertResource(ctx, suite.T(), suite.Client.COSI,
+	rtestutils.AssertResource(
+		ctx, suite.T(), suite.Client.COSI,
 		"runc",
 		func(item *runtime.SBOMItem, asrt *assert.Assertions) {
 			asrt.Equal("v"+constants.RuncVersion, item.TypedSpec().Version)
@@ -88,7 +94,8 @@ func (suite *SBOMSuite) TestCommon() {
 	)
 
 	// Assert on Go version.
-	rtestutils.AssertResource(ctx, suite.T(), suite.Client.COSI,
+	rtestutils.AssertResource(
+		ctx, suite.T(), suite.Client.COSI,
 		"golang",
 		func(item *runtime.SBOMItem, asrt *assert.Assertions) {
 			goVersion := strings.TrimPrefix(constants.GoVersion, "go")
@@ -99,7 +106,8 @@ func (suite *SBOMSuite) TestCommon() {
 
 	if suite.Capabilities().RunsTalosKernel {
 		// Assert on Talos kernel version.
-		rtestutils.AssertResource(ctx, suite.T(), suite.Client.COSI,
+		rtestutils.AssertResource(
+			ctx, suite.T(), suite.Client.COSI,
 			"kernel",
 			func(item *runtime.SBOMItem, asrt *assert.Assertions) {
 				// cut the suffix, first try removing .0 patch version for kernel releases like 6.17

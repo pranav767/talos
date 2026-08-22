@@ -86,7 +86,7 @@ type BondMasterSpec struct {
 	// Maximum of 16 targets are supported.
 	NSIP6Targets []netip.Addr `yaml:"nsIp6Targets,omitempty" protobuf:"26"`
 	// ADLACPActive specifies whether to send LACPDU frames periodically.
-	ADLACPActive nethelpers.ADLACPActive `yaml:"adLacpActive,omitempty" protobuf:"27"`
+	ADLACPActive *nethelpers.ADLACPActive `yaml:"adLacpActive,omitempty" protobuf:"27"`
 	// MissedMax is the number of arp_interval monitor checks that must fail in order for an interface to be marked down by the ARP monitor.
 	MissedMax uint8 `yaml:"missedMax,omitempty" protobuf:"28"`
 }
@@ -211,7 +211,18 @@ func (spec *BondMasterSpec) Equal(other *BondMasterSpec) bool {
 		}
 	}
 
-	if spec.ADLACPActive != other.ADLACPActive {
+	// default value for ADLACPActive is "on" in Linux, so if both are nil or "on", consider them equal
+	specADLACPActive, otherADLACPActive := nethelpers.ADLACPActiveOn, nethelpers.ADLACPActiveOn
+
+	if spec.ADLACPActive != nil {
+		specADLACPActive = *spec.ADLACPActive
+	}
+
+	if other.ADLACPActive != nil {
+		otherADLACPActive = *other.ADLACPActive
+	}
+
+	if specADLACPActive != otherADLACPActive {
 		return false
 	}
 
@@ -254,7 +265,7 @@ func (spec *BondMasterSpec) IsZero() bool {
 		spec.PeerNotifyDelay == 0 &&
 		len(spec.ARPIPTargets) == 0 &&
 		len(spec.NSIP6Targets) == 0 &&
-		spec.ADLACPActive == 0 &&
+		spec.ADLACPActive == nil &&
 		spec.MissedMax == 0
 }
 
@@ -280,12 +291,19 @@ type BridgeVLANSpec struct {
 	FilteringEnabled bool `yaml:"filteringEnabled" protobuf:"1"`
 }
 
+// VRFMasterSpec describes vrf settings if Kind == "vrf".
+//
+//gotagsrewrite:gen
+type VRFMasterSpec struct {
+	Table nethelpers.RoutingTable `yaml:"table" protobuf:"1"`
+}
+
 // WireguardSpec describes Wireguard settings if Kind == "wireguard".
 //
 //gotagsrewrite:gen
 type WireguardSpec struct {
 	// PrivateKey is used to configure the link, present only in the LinkSpec.
-	PrivateKey string `yaml:"privateKey,omitempty" protobuf:"1"`
+	PrivateKey string `yaml:"privateKey,omitempty" protobuf:"1" redact:"replace"`
 	// PublicKey is only used in LinkStatus to show the link status.
 	PublicKey    string          `yaml:"publicKey,omitempty" protobuf:"2"`
 	ListenPort   int             `yaml:"listenPort" protobuf:"3"`
@@ -298,7 +316,7 @@ type WireguardSpec struct {
 //gotagsrewrite:gen
 type WireguardPeer struct {
 	PublicKey                   string         `yaml:"publicKey" protobuf:"1"`
-	PresharedKey                string         `yaml:"presharedKey" protobuf:"2"`
+	PresharedKey                string         `yaml:"presharedKey" protobuf:"2" redact:"replace"`
 	Endpoint                    string         `yaml:"endpoint" protobuf:"3"`
 	PersistentKeepaliveInterval time.Duration  `yaml:"persistentKeepaliveInterval" protobuf:"4"`
 	AllowedIPs                  []netip.Prefix `yaml:"allowedIPs" protobuf:"5"`

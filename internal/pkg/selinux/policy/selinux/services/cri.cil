@@ -44,8 +44,16 @@
 ; iptables used by CNI
 (allow pod_containerd_t bin_exec_t (file (execute_no_trans execute)))
 (allow pod_containerd_t bin_exec_t (fs_classes (ro)))
-; (allow pod_p cni_conf_t (fs_classes (rw)))
+; /etc/cni is a context=cni_conf_t writable tmpfs; the CRI containerd manages the CNI config
+; tree there (e.g. creating net.d), so pod_containerd_t needs rw on cni_conf_t. Without it,
+; under enforcing the CRI plugin's CNI init fails (avc: denied write pod_containerd_t->cni_conf_t
+; dir) and runtime.v1.RuntimeService is never registered. Pods get cni_conf_t rw via pod_p below.
+(allow pod_containerd_t cni_conf_t (fs_classes (rw)))
 (allow pod_containerd_t cni_state_t (fs_classes (rw)))
+
+; /etc/kubernetes is a context=k8s_conf_t tmpfs now (its superblock is k8s_conf_t), so runc
+; remounts it (read-only bind) when mounting kube config into containers.
+(allow pod_containerd_t k8s_conf_t (filesystem (remount)))
 
 ; Logs
 (allow pod_containerd_t pods_log_t (fs_classes (rw)))
@@ -74,6 +82,9 @@
 (type cni_conf_t)
 (call filesystem_f (cni_conf_t))
 (filecon "/etc/cni(/.*)?" any (system_u object_r cni_conf_t (systemLow systemLow)))
+; /etc/cni is a tmpfs mounted with context=cni_conf_t (its superblock is cni_conf_t too),
+; so cni_conf_t inodes must be allowed to associate with a cni_conf_t-labeled filesystem.
+(allow cni_conf_t cni_conf_t (filesystem (associate)))
 
 (type cni_plugin_t)
 (call filesystem_f (cni_plugin_t))
@@ -237,3 +248,7 @@
 ; [  110.873621] audit: type=1400 audit(1742647858.928:213): avc:  denied  { relabelfrom } for  pid=4732 comm="containerd" name="etc" dev="vda4" ino=122484 scontext=system_u:system_r:pod_t:s0 tcontext=system_u:object_r:ephemeral_t:s0 tclass=dir permissive=1
 ; [  110.875762] audit: type=1400 audit(1742647858.928:213): avc:  denied  { relabelto } for  pid=4732 comm="containerd" name="etc" dev="vda4" ino=122484 scontext=system_u:system_r:pod_t:s0 tcontext=system_u:object_r:ephemeral_t:s0 tclass=dir permissive=1
 (allow pod_p ephemeral_t (fs_classes (relabelfrom relabelto)))
+
+; CRI containerd should talk machined API to call machine.ImageService/Verify API
+(allow pod_containerd_t machine_socket_t (fs_classes (rw)))
+(allow pod_containerd_t init_t (unix_stream_socket (connectto)))

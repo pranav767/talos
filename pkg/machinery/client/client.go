@@ -39,11 +39,16 @@ type Client struct {
 	options *Options
 	conn    *grpcConnectionWrapper
 
-	MachineClient machineapi.MachineServiceClient
-	TimeClient    timeapi.TimeServiceClient
-	ClusterClient clusterapi.ClusterServiceClient
-	StorageClient storageapi.StorageServiceClient
-	InspectClient inspectapi.InspectServiceClient
+	MachineClient   machineapi.MachineServiceClient
+	TimeClient      timeapi.TimeServiceClient
+	ClusterClient   clusterapi.ClusterServiceClient
+	StorageClient   storageapi.StorageServiceClient
+	LVMClient       machineapi.LVMServiceClient
+	MDClient        machineapi.MDServiceClient
+	InspectClient   inspectapi.InspectServiceClient
+	ImageClient     machineapi.ImageServiceClient
+	DebugClient     machineapi.DebugServiceClient
+	LifecycleClient machineapi.LifecycleServiceClient
 
 	COSI state.State
 
@@ -168,7 +173,12 @@ func New(_ context.Context, opts ...OptionFunc) (c *Client, err error) {
 	c.TimeClient = timeapi.NewTimeServiceClient(c.conn)
 	c.ClusterClient = clusterapi.NewClusterServiceClient(c.conn)
 	c.StorageClient = storageapi.NewStorageServiceClient(c.conn)
+	c.LVMClient = machineapi.NewLVMServiceClient(c.conn)
+	c.MDClient = machineapi.NewMDServiceClient(c.conn)
 	c.InspectClient = inspectapi.NewInspectServiceClient(c.conn)
+	c.ImageClient = machineapi.NewImageServiceClient(c.conn)
+	c.DebugClient = machineapi.NewDebugServiceClient(c.conn)
+	c.LifecycleClient = machineapi.NewLifecycleServiceClient(c.conn)
 
 	c.Inspect = &InspectClient{c.InspectClient}
 	c.COSI = state.WrapCore(client.NewAdapter(cosiv1alpha1.NewStateClient(c.conn)))
@@ -324,6 +334,13 @@ func (c *Client) ResetGenericWithResponse(ctx context.Context, req *machineapi.R
 
 // RebootMode provides various mode through which the reboot process can be done.
 type RebootMode func(*machineapi.RebootRequest)
+
+// WithRebootMode sets the reboot mode for the Reboot API call.
+func WithRebootMode(mode machineapi.RebootRequest_Mode) func(req *machineapi.RebootRequest) {
+	return func(req *machineapi.RebootRequest) {
+		req.Mode = mode
+	}
+}
 
 // WithPowerCycle option runs the Reboot fun in powercycle mode.
 func WithPowerCycle(req *machineapi.RebootRequest) {
@@ -563,6 +580,8 @@ func WithUpgradeGRPCCallOptions(opts ...grpc.CallOption) UpgradeOption {
 }
 
 // Upgrade initiates a Talos upgrade and implements the proto.MachineServiceClient interface.
+//
+// Deprecated: use LifecycleClient instead.
 func (c *Client) Upgrade(ctx context.Context, image string, stage, force bool, callOptions ...grpc.CallOption) (*machineapi.UpgradeResponse, error) {
 	return c.UpgradeWithOptions(
 		ctx,
@@ -575,6 +594,8 @@ func (c *Client) Upgrade(ctx context.Context, image string, stage, force bool, c
 }
 
 // UpgradeWithOptions initiates a Talos upgrade with the given options.
+//
+// Deprecated: use LifecycleClient instead.
 func (c *Client) UpgradeWithOptions(ctx context.Context, opts ...UpgradeOption) (*machineapi.UpgradeResponse, error) {
 	var options UpgradeOptions
 
@@ -600,7 +621,7 @@ func (c *Client) ServiceList(ctx context.Context, callOptions ...grpc.CallOption
 
 // ServiceInfo provides info about a service and node metadata.
 type ServiceInfo struct {
-	Metadata *common.Metadata
+	Metadata *common.Metadata //nolint:staticcheck // legacy API
 	Service  *machineapi.ServiceInfo
 }
 
@@ -911,7 +932,7 @@ func ReadStream(stream MachineStream) (io.ReadCloser, error) {
 		for {
 			data, err := stream.Recv()
 			if err != nil {
-				if errors.Is(err, io.EOF) || StatusCode(err) == codes.Canceled || StatusCode(err) == codes.DeadlineExceeded {
+				if errors.Is(err, io.EOF) {
 					return
 				}
 
@@ -927,7 +948,7 @@ func ReadStream(stream MachineStream) (io.ReadCloser, error) {
 				}
 			}
 
-			if data.Metadata != nil && data.Metadata.Error != "" {
+			if data.Metadata != nil && data.Metadata.Error != "" { //nolint:staticcheck // legacy behavior
 				pw.CloseWithError(metaToErr(data.Metadata))
 
 				return
@@ -938,6 +959,7 @@ func ReadStream(stream MachineStream) (io.ReadCloser, error) {
 	return pr, stream.CloseSend()
 }
 
+//nolint:staticcheck
 func metaToErr(md *common.Metadata) error {
 	if md.Status == nil {
 		return errors.New(md.Error)
@@ -994,8 +1016,11 @@ func (c *Client) MetaDelete(ctx context.Context, key uint8, callOptions ...grpc.
 }
 
 // ImageList lists images in the CRI.
+//
+// Deprecated: use ImageServiceClient instead.
 func (c *Client) ImageList(ctx context.Context, namespace common.ContainerdNamespace, callOptions ...grpc.CallOption) (machineapi.MachineService_ImageListClient, error) {
-	return c.MachineClient.ImageList(ctx,
+	return c.MachineClient.ImageList(
+		ctx,
 		&machineapi.ImageListRequest{
 			Namespace: namespace,
 		},
@@ -1004,8 +1029,11 @@ func (c *Client) ImageList(ctx context.Context, namespace common.ContainerdNames
 }
 
 // ImagePull pre-pulls an image to the CRI.
+//
+// Deprecated: use ImageServiceClient instead.
 func (c *Client) ImagePull(ctx context.Context, namespace common.ContainerdNamespace, imageRef string, callOptions ...grpc.CallOption) error {
-	resp, err := c.MachineClient.ImagePull(ctx,
+	resp, err := c.MachineClient.ImagePull(
+		ctx,
 		&machineapi.ImagePullRequest{
 			Namespace: namespace,
 			Reference: imageRef,
@@ -1023,6 +1051,44 @@ func (c *Client) BlockDeviceWipe(ctx context.Context, req *storageapi.BlockDevic
 	resp, err := c.StorageClient.BlockDeviceWipe(ctx, req, callOptions...)
 
 	_, err = FilterMessages(resp, err)
+
+	return err
+}
+
+// LogicalVolumeRemove removes a single LVM logical volume via LVMService.
+//
+// Multi-node fan-out is the caller's responsibility: dispatch one call per
+// node with client.WithNode (see talosctl/multiplex.Unary), because
+// google.protobuf.Empty cannot be augmented with per-node metadata by apid's
+// one-to-many proxy path.
+func (c *Client) LogicalVolumeRemove(ctx context.Context, req *machineapi.LVMServiceLogicalVolumeRemoveRequest, callOptions ...grpc.CallOption) error {
+	_, err := c.LVMClient.LogicalVolumeRemove(ctx, req, callOptions...)
+
+	return err
+}
+
+// VolumeGroupRemove removes a single LVM volume group via LVMService.
+// See LogicalVolumeRemove for multi-node fan-out semantics.
+func (c *Client) VolumeGroupRemove(ctx context.Context, req *machineapi.LVMServiceVolumeGroupRemoveRequest, callOptions ...grpc.CallOption) error {
+	_, err := c.LVMClient.VolumeGroupRemove(ctx, req, callOptions...)
+
+	return err
+}
+
+// PhysicalVolumeRemove wipes LVM metadata from a single physical volume via LVMService.
+// See LogicalVolumeRemove for multi-node fan-out semantics.
+func (c *Client) PhysicalVolumeRemove(ctx context.Context, req *machineapi.LVMServicePhysicalVolumeRemoveRequest, callOptions ...grpc.CallOption) error {
+	_, err := c.LVMClient.PhysicalVolumeRemove(ctx, req, callOptions...)
+
+	return err
+}
+
+// MDDestroy stops an MD array and clears its member superblocks via MDService.
+//
+// Multi-node fan-out is the caller's responsibility: dispatch one call per
+// node with client.WithNode (see client/multiplex.Unary).
+func (c *Client) MDDestroy(ctx context.Context, req *machineapi.MDDestroyRequest, callOptions ...grpc.CallOption) error {
+	_, err := c.MDClient.Destroy(ctx, req, callOptions...)
 
 	return err
 }

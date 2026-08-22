@@ -6,6 +6,7 @@
 package network_test
 
 import (
+	"crypto/fips140"
 	"fmt"
 	"math/rand/v2"
 	"net"
@@ -19,17 +20,19 @@ import (
 	"github.com/cosi-project/runtime/pkg/safe"
 	"github.com/jsimonetti/rtnetlink/v2"
 	"github.com/siderolabs/gen/xslices"
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	networkadapter "github.com/siderolabs/talos/internal/app/machined/pkg/adapters/network"
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/ctest"
 	netctrl "github.com/siderolabs/talos/internal/app/machined/pkg/controllers/network"
-	"github.com/siderolabs/talos/pkg/machinery/fipsmode"
 	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
 	runtimeres "github.com/siderolabs/talos/pkg/machinery/resources/runtime"
@@ -37,6 +40,8 @@ import (
 
 type LinkSpecSuite struct {
 	ctest.DefaultSuite
+
+	observedLogs *observer.ObservedLogs
 }
 
 func (suite *LinkSpecSuite) uniqueDummyInterface() string {
@@ -103,7 +108,7 @@ func (suite *LinkSpecSuite) TestDummy() {
 
 	// attempt to change multicast flag
 	ctest.UpdateWithConflicts(suite, dummy, func(r *network.LinkSpec) error {
-		r.TypedSpec().Multicast = pointer.To(true)
+		r.TypedSpec().Multicast = new(true)
 
 		return nil
 	})
@@ -114,8 +119,7 @@ func (suite *LinkSpecSuite) TestDummy() {
 
 	// attempt to disable multicast
 	ctest.UpdateWithConflicts(suite, dummy, func(r *network.LinkSpec) error {
-		r.TypedSpec().Multicast = new(bool)
-		r.TypedSpec().Multicast = pointer.To(false)
+		r.TypedSpec().Multicast = new(false)
 
 		return nil
 	})
@@ -157,6 +161,212 @@ func (suite *LinkSpecSuite) TestDummyWithMAC() {
 	suite.Require().NoError(suite.State().TeardownAndDestroy(suite.Ctx(), dummy.Metadata()))
 
 	ctest.AssertNoResource[*network.LinkSpec](suite, dummyInterface)
+}
+
+func (suite *LinkSpecSuite) TestVeth() {
+	primaryName := suite.uniqueDummyInterface()
+	peerName := suite.uniqueDummyInterface()
+
+	conn, err := rtnetlink.Dial(nil)
+	suite.Require().NoError(err)
+
+	defer conn.Close() //nolint:errcheck
+	defer func() {
+		if iface, ifaceErr := net.InterfaceByName(primaryName); ifaceErr == nil {
+			conn.Link.Delete(uint32(iface.Index)) //nolint:errcheck
+		}
+	}()
+
+	primary := network.NewLinkSpec(network.NamespaceName, primaryName)
+	*primary.TypedSpec() = network.LinkSpecSpec{
+		Name:        primaryName,
+		Type:        nethelpers.LinkEther,
+		Kind:        network.LinkKindVeth,
+		MTU:         1400,
+		Up:          true,
+		Logical:     true,
+		Veth:        network.VethSpec{PeerName: peerName},
+		ConfigLayer: network.ConfigDefault,
+	}
+
+	peer := network.NewLinkSpec(network.NamespaceName, peerName)
+	*peer.TypedSpec() = network.LinkSpecSpec{
+		Name:        peerName,
+		Type:        nethelpers.LinkEther,
+		Kind:        network.LinkKindVeth,
+		MTU:         1300,
+		Up:          true,
+		Logical:     true,
+		Veth:        network.VethSpec{PeerName: primaryName},
+		ConfigLayer: network.ConfigDefault,
+	}
+
+	// LinkSpecController atomically creates the pair and configures both endpoints independently of resource order.
+	suite.Create(peer)
+	suite.Create(primary)
+
+	ctest.AssertResources(suite, []string{primaryName, peerName}, func(r *network.LinkStatus, asrt *assert.Assertions) {
+		asrt.Equal(network.LinkKindVeth, r.TypedSpec().Kind)
+		asrt.Contains([]nethelpers.OperationalState{nethelpers.OperStateUp, nethelpers.OperStateUnknown}, r.TypedSpec().OperationalState)
+
+		if r.Metadata().ID() == primaryName {
+			asrt.EqualValues(1400, r.TypedSpec().MTU)
+		} else {
+			asrt.EqualValues(1300, r.TypedSpec().MTU)
+		}
+	})
+
+	links, err := conn.Link.List()
+	suite.Require().NoError(err)
+
+	var primaryIndex, peerIndex, primaryPeerIndex, peerPeerIndex uint32
+
+	for _, link := range links {
+		switch link.Attributes.Name {
+		case primaryName:
+			primaryIndex = link.Index
+			primaryPeerIndex = link.Attributes.Type
+		case peerName:
+			peerIndex = link.Index
+			peerPeerIndex = link.Attributes.Type
+		}
+	}
+
+	suite.Equal(peerIndex, primaryPeerIndex)
+	suite.Equal(primaryIndex, peerPeerIndex)
+
+	for _, r := range []resource.Resource{primary, peer} {
+		suite.Require().NoError(suite.State().TeardownAndDestroy(suite.Ctx(), r.Metadata()))
+	}
+
+	ctest.AssertNoResource[*network.LinkStatus](suite, primaryName)
+	ctest.AssertNoResource[*network.LinkStatus](suite, peerName)
+}
+
+func (suite *LinkSpecSuite) TestVethReconfigurePeers() {
+	nameA := suite.uniqueDummyInterface()
+	nameB := suite.uniqueDummyInterface()
+	nameC := suite.uniqueDummyInterface()
+	nameD := suite.uniqueDummyInterface()
+
+	specA, specB := newVethLinkSpecs(nameA, nameB)
+	specC, specD := newVethLinkSpecs(nameC, nameD)
+	specs := []*network.LinkSpec{specA, specB, specC, specD}
+
+	for _, spec := range specs {
+		suite.Create(spec)
+	}
+
+	assertPeer := func(name, peerName string) {
+		ctest.AssertResource(suite, name, func(link *network.LinkStatus, asrt *assert.Assertions) {
+			asrt.Equal(network.LinkKindVeth, link.TypedSpec().Kind)
+			asrt.Equal(peerName, link.TypedSpec().Veth.PeerName)
+		})
+	}
+
+	assertPeer(nameA, nameB)
+	assertPeer(nameB, nameA)
+	assertPeer(nameC, nameD)
+	assertPeer(nameD, nameC)
+
+	peers := map[string]string{
+		nameA: nameC,
+		nameB: nameD,
+		nameC: nameA,
+		nameD: nameB,
+	}
+
+	for _, spec := range specs {
+		ctest.UpdateWithConflicts(suite, spec, func(link *network.LinkSpec) error {
+			link.TypedSpec().Veth.PeerName = peers[link.TypedSpec().Name]
+
+			return nil
+		})
+	}
+
+	assertPeer(nameA, nameC)
+	assertPeer(nameB, nameD)
+	assertPeer(nameC, nameA)
+	assertPeer(nameD, nameB)
+
+	for _, spec := range specs {
+		suite.Require().NoError(suite.State().TeardownAndDestroy(suite.Ctx(), spec.Metadata()))
+	}
+
+	for _, name := range []string{nameA, nameB, nameC, nameD} {
+		ctest.AssertNoResource[*network.LinkStatus](suite, name)
+	}
+}
+
+func (suite *LinkSpecSuite) TestVethReplacesWrongKind() {
+	primaryName := suite.uniqueDummyInterface()
+	peerName := suite.uniqueDummyInterface()
+
+	conn, err := rtnetlink.Dial(nil)
+	suite.Require().NoError(err)
+
+	defer conn.Close() //nolint:errcheck
+
+	suite.Require().NoError(conn.Link.New(&rtnetlink.LinkMessage{
+		Type: uint16(nethelpers.LinkEther),
+		Attributes: &rtnetlink.LinkAttributes{
+			Name: primaryName,
+			Info: &rtnetlink.LinkInfo{
+				Kind: "dummy",
+				Data: &rtnetlink.LinkData{Name: "dummy"},
+			},
+		},
+	}))
+
+	defer func() {
+		if iface, ifaceErr := net.InterfaceByName(primaryName); ifaceErr == nil {
+			conn.Link.Delete(uint32(iface.Index)) //nolint:errcheck
+		}
+	}()
+
+	ctest.AssertResource(suite, primaryName, func(r *network.LinkStatus, asrt *assert.Assertions) {
+		asrt.Equal("dummy", r.TypedSpec().Kind)
+	})
+
+	primary, peer := newVethLinkSpecs(primaryName, peerName)
+	suite.Create(primary)
+	suite.Create(peer)
+
+	ctest.AssertResources(suite, []string{primaryName, peerName}, func(r *network.LinkStatus, asrt *assert.Assertions) {
+		asrt.Equal(network.LinkKindVeth, r.TypedSpec().Kind)
+	})
+
+	suite.Require().NoError(suite.State().TeardownAndDestroy(suite.Ctx(), primary.Metadata()))
+	suite.Require().NoError(suite.State().TeardownAndDestroy(suite.Ctx(), peer.Metadata()))
+
+	ctest.AssertNoResource[*network.LinkStatus](suite, primaryName)
+	ctest.AssertNoResource[*network.LinkStatus](suite, peerName)
+}
+
+func newVethLinkSpecs(primaryName, peerName string) (*network.LinkSpec, *network.LinkSpec) {
+	primary := network.NewLinkSpec(network.NamespaceName, primaryName)
+	*primary.TypedSpec() = network.LinkSpecSpec{
+		Name:        primaryName,
+		Type:        nethelpers.LinkEther,
+		Kind:        network.LinkKindVeth,
+		Up:          true,
+		Logical:     true,
+		Veth:        network.VethSpec{PeerName: peerName},
+		ConfigLayer: network.ConfigDefault,
+	}
+
+	peer := network.NewLinkSpec(network.NamespaceName, peerName)
+	*peer.TypedSpec() = network.LinkSpecSpec{
+		Name:        peerName,
+		Type:        nethelpers.LinkEther,
+		Kind:        network.LinkKindVeth,
+		Up:          true,
+		Logical:     true,
+		Veth:        network.VethSpec{PeerName: primaryName},
+		ConfigLayer: network.ConfigDefault,
+	}
+
+	return primary, peer
 }
 
 //nolint:gocyclo
@@ -573,6 +783,14 @@ func (suite *LinkSpecSuite) TestBond8023ad() {
 		}
 	})
 
+	for _, entry := range suite.observedLogs.FilterMessage("controller failed").All() {
+		suite.Require().NotContains(fmt.Sprint(entry.ContextMap()["error"]), bondName)
+	}
+
+	for _, entry := range suite.observedLogs.FilterMessage("updating bond settings").All() {
+		suite.Require().NotEqual(bondName, entry.ContextMap()["link"])
+	}
+
 	// teardown the links
 	for _, r := range append(dummies, bond) {
 		suite.Require().NoError(suite.State().TeardownAndDestroy(suite.Ctx(), r.Metadata()))
@@ -683,19 +901,124 @@ func (suite *LinkSpecSuite) TestBridge() {
 }
 
 //nolint:gocyclo
-func (suite *LinkSpecSuite) TestWireguard() {
-	if fipsmode.Strict() {
-		suite.T().Skip("skipping test in strict FIPS mode")
+func (suite *LinkSpecSuite) TestVRF() {
+	vrfName := suite.uniqueDummyInterface()
+	vrf := network.NewLinkSpec(network.NamespaceName, vrfName)
+	*vrf.TypedSpec() = network.LinkSpecSpec{
+		Name:    vrfName,
+		Type:    nethelpers.LinkEther,
+		Kind:    network.LinkKindVRF,
+		Up:      true,
+		Logical: true,
+		VRFMaster: network.VRFMasterSpec{
+			Table: 123,
+		},
+		ConfigLayer: network.ConfigDefault,
 	}
 
-	priv, err := wgtypes.GeneratePrivateKey()
-	suite.Require().NoError(err)
+	dummy0Name := suite.uniqueDummyInterface()
+	dummy0 := network.NewLinkSpec(network.NamespaceName, dummy0Name)
+	*dummy0.TypedSpec() = network.LinkSpecSpec{
+		Name:    dummy0Name,
+		Type:    nethelpers.LinkEther,
+		Kind:    "dummy",
+		Up:      true,
+		Logical: true,
+		VRFSlave: network.VRFSlave{
+			MasterName: vrfName,
+		},
+		ConfigLayer: network.ConfigDefault,
+	}
 
-	pub1, err := wgtypes.GeneratePrivateKey()
-	suite.Require().NoError(err)
+	dummy1Name := suite.uniqueDummyInterface()
+	dummy1 := network.NewLinkSpec(network.NamespaceName, dummy1Name)
+	*dummy1.TypedSpec() = network.LinkSpecSpec{
+		Name:    dummy1Name,
+		Type:    nethelpers.LinkEther,
+		Kind:    "dummy",
+		Up:      true,
+		Logical: true,
+		VRFSlave: network.VRFSlave{
+			MasterName: vrfName,
+		},
+		ConfigLayer: network.ConfigDefault,
+	}
 
-	pub2, err := wgtypes.GeneratePrivateKey()
-	suite.Require().NoError(err)
+	for _, res := range []resource.Resource{dummy0, dummy1, vrf} {
+		suite.Create(res)
+	}
+
+	ctest.AssertResources(suite, []string{dummy0Name, dummy1Name, vrfName}, func(r *network.LinkStatus, asrt *assert.Assertions) {
+		switch r.Metadata().ID() {
+		case vrfName:
+			asrt.Equal(network.LinkKindVRF, r.TypedSpec().Kind)
+			asrt.Contains([]nethelpers.OperationalState{nethelpers.OperStateUp, nethelpers.OperStateUnknown}, r.TypedSpec().OperationalState)
+		case dummy0Name, dummy1Name:
+			asrt.Equal("dummy", r.TypedSpec().Kind)
+			asrt.Equal(nethelpers.OperStateUnknown, r.TypedSpec().OperationalState)
+			asrt.NotZero(r.TypedSpec().MasterIndex)
+		}
+	})
+
+	// attempt to change the vrf table
+	ctest.UpdateWithConflicts(suite, vrf, func(r *network.LinkSpec) error {
+		r.TypedSpec().VRFMaster.Table = nethelpers.RoutingTable(124)
+
+		return nil
+	})
+
+	ctest.AssertResource(suite, vrfName, func(r *network.LinkStatus, asrt *assert.Assertions) {
+		asrt.Equal(network.LinkKindVRF, r.TypedSpec().Kind)
+		asrt.Equal(nethelpers.RoutingTable(124), r.TypedSpec().VRFMaster.Table)
+	})
+
+	// unslave one of the interfaces
+	ctest.UpdateWithConflicts(suite, dummy0, func(r *network.LinkSpec) error {
+		r.TypedSpec().VRFSlave.MasterName = ""
+
+		return nil
+	})
+
+	ctest.AssertResource(suite, dummy0Name, func(r *network.LinkStatus, asrt *assert.Assertions) {
+		asrt.Zero(r.TypedSpec().MasterIndex)
+	})
+
+	// teardown the links
+	for _, r := range []resource.Resource{dummy0, dummy1, vrf} {
+		suite.Require().NoError(suite.State().TeardownAndDestroy(suite.Ctx(), r.Metadata()))
+	}
+
+	ctest.AssertNoResource[*network.LinkStatus](suite, dummy0Name)
+	ctest.AssertNoResource[*network.LinkStatus](suite, dummy1Name)
+	ctest.AssertNoResource[*network.LinkStatus](suite, vrfName)
+}
+
+//nolint:gocyclo
+func (suite *LinkSpecSuite) TestWireguard() {
+	var (
+		priv, priv2, pub1, pub2             wgtypes.Key
+		privPub, priv2Pub, pub1Pub, pub2Pub wgtypes.Key
+		err                                 error
+	)
+
+	fips140.WithoutEnforcement(func() {
+		priv, err = wgtypes.GeneratePrivateKey()
+		suite.Require().NoError(err)
+
+		pub1, err = wgtypes.GeneratePrivateKey()
+		suite.Require().NoError(err)
+
+		pub2, err = wgtypes.GeneratePrivateKey()
+		suite.Require().NoError(err)
+
+		priv2, err = wgtypes.GeneratePrivateKey()
+		suite.Require().NoError(err)
+
+		privPub = priv.PublicKey()
+		pub1Pub = pub1.PublicKey()
+		pub2Pub = pub2.PublicKey()
+		priv2Pub = priv2.PublicKey()
+	})
 
 	wgInterface := suite.uniqueDummyInterface()
 
@@ -711,14 +1034,14 @@ func (suite *LinkSpecSuite) TestWireguard() {
 			FirewallMark: 1,
 			Peers: []network.WireguardPeer{
 				{
-					PublicKey: pub1.PublicKey().String(),
+					PublicKey: pub1Pub.String(),
 					Endpoint:  "10.2.0.3:20000",
 					AllowedIPs: []netip.Prefix{
 						netip.MustParsePrefix("172.24.0.0/16"),
 					},
 				},
 				{
-					PublicKey: pub2.PublicKey().String(),
+					PublicKey: pub2Pub.String(),
 					AllowedIPs: []netip.Prefix{
 						netip.MustParsePrefix("172.25.0.0/24"),
 					},
@@ -735,14 +1058,11 @@ func (suite *LinkSpecSuite) TestWireguard() {
 	ctest.AssertResource(suite, wgInterface, func(r *network.LinkStatus, asrt *assert.Assertions) {
 		asrt.Equal("wireguard", r.TypedSpec().Kind)
 		asrt.Contains([]nethelpers.OperationalState{nethelpers.OperStateUp, nethelpers.OperStateUnknown}, r.TypedSpec().OperationalState)
-		asrt.Equal(priv.PublicKey().String(), r.TypedSpec().Wireguard.PublicKey)
+		asrt.Equal(privPub.String(), r.TypedSpec().Wireguard.PublicKey)
 		asrt.Len(r.TypedSpec().Wireguard.Peers, 2)
 	})
 
 	// attempt to change wireguard private key
-	priv2, err := wgtypes.GeneratePrivateKey()
-	suite.Require().NoError(err)
-
 	ctest.UpdateWithConflicts(suite, wg, func(r *network.LinkSpec) error {
 		r.TypedSpec().Wireguard.PrivateKey = priv2.String()
 
@@ -750,7 +1070,7 @@ func (suite *LinkSpecSuite) TestWireguard() {
 	})
 
 	ctest.AssertResource(suite, wgInterface, func(r *network.LinkStatus, asrt *assert.Assertions) {
-		asrt.Equal(priv2.PublicKey().String(), r.TypedSpec().Wireguard.PublicKey)
+		asrt.Equal(priv2Pub.String(), r.TypedSpec().Wireguard.PublicKey)
 	})
 
 	// teardown the links
@@ -766,8 +1086,13 @@ func TestLinkSpecSuite(t *testing.T) {
 		t.Skip("requires root")
 	}
 
+	observerCore, observedLogs := observer.New(zap.DebugLevel)
+	logger := zap.New(zapcore.NewTee(zaptest.NewLogger(t).Core(), observerCore))
+
 	suite.Run(t, &LinkSpecSuite{
+		observedLogs: observedLogs,
 		DefaultSuite: ctest.DefaultSuite{
+			Logger:  logger,
 			Timeout: 15 * time.Second,
 			AfterSetup: func(suite *ctest.DefaultSuite) {
 				// create fake device ready status
@@ -782,7 +1107,7 @@ func TestLinkSpecSuite(t *testing.T) {
 	})
 }
 
-func TestSortBonds(t *testing.T) {
+func TestSortLinks(t *testing.T) {
 	expected := toResources([]network.LinkSpecSpec{
 		{
 			Name: "A",
@@ -812,6 +1137,18 @@ func TestSortBonds(t *testing.T) {
 				MasterName: "C",
 				SlaveIndex: 2,
 			},
+		}, {
+			Name: "Z",
+		}, {
+			Name: "D",
+			VRFSlave: network.VRFSlave{
+				MasterName: "Z",
+			},
+		}, {
+			Name: "H",
+			VRFSlave: network.VRFSlave{
+				MasterName: "Z",
+			},
 		},
 	})
 
@@ -825,7 +1162,7 @@ func TestSortBonds(t *testing.T) {
 		})
 
 		rnd.Shuffle(res.Len(), res.Swap)
-		netctrl.SortBonds(&res)
+		netctrl.SortLinks(&res)
 		require.Equal(t, expected, res, "failed with seed %d iteration %d", seed, i)
 	}
 }

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
-	"github.com/siderolabs/go-pointer"
 	"github.com/siderolabs/go-procfs/procfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -124,14 +123,14 @@ func (suite *AddressConfigSuite) TestMachineConfigurationLegacy() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineNetwork: &v1alpha1.NetworkConfig{
+					MachineNetwork: &v1alpha1.NetworkConfig{ //nolint:staticcheck // legacy config
 						NetworkInterfaces: []*v1alpha1.Device{
 							{
 								DeviceInterface: "eth3",
 								DeviceCIDR:      "192.168.0.24/28",
 							},
 							{
-								DeviceIgnore:    pointer.To(true),
+								DeviceIgnore:    new(true),
 								DeviceInterface: "eth4",
 								DeviceCIDR:      "192.168.0.24/28",
 							},
@@ -211,7 +210,7 @@ func (suite *AddressConfigSuite) TestMachineConfiguration() {
 	lc2.LinkAddresses = []networkcfg.AddressConfig{
 		{
 			AddressAddress:  netip.MustParsePrefix("172.20.0.1/20"),
-			AddressPriority: pointer.To[uint32](100),
+			AddressPriority: new(uint32(100)),
 		},
 	}
 
@@ -232,6 +231,32 @@ func (suite *AddressConfigSuite) TestMachineConfiguration() {
 			if r.Metadata().ID() == "configuration/enp0s3/172.20.0.1/20" {
 				asrt.Equal(uint32(100), r.TypedSpec().Priority)
 			}
+		},
+		rtestutils.WithNamespace(network.ConfigNamespaceName),
+	)
+}
+
+func (suite *AddressConfigSuite) TestVethMachineConfiguration() {
+	suite.Require().NoError(suite.Runtime().RegisterController(&netctrl.AddressConfigController{}))
+
+	veth := networkcfg.NewVethConfigV1Alpha1("veth-metallb", "veth-router")
+	veth.LinkAddresses = []networkcfg.AddressConfig{{AddressAddress: netip.MustParsePrefix("fda1::1/127")}}
+	veth.VethPeer.LinkAddresses = []networkcfg.AddressConfig{{AddressAddress: netip.MustParsePrefix("fda1::/127")}}
+
+	ctr, err := container.New(veth)
+	suite.Require().NoError(err)
+
+	suite.Create(config.NewMachineConfig(ctr))
+
+	ctest.AssertResources(
+		suite,
+		[]string{
+			"configuration/veth-metallb/fda1::1/127",
+			"configuration/veth-router/fda1::/127",
+		},
+		func(r *network.AddressSpec, asrt *assert.Assertions) {
+			asrt.Equal(network.ConfigMachineConfiguration, r.TypedSpec().ConfigLayer)
+			asrt.Contains([]string{"veth-metallb", "veth-router"}, r.TypedSpec().LinkName)
 		},
 		rtestutils.WithNamespace(network.ConfigNamespaceName),
 	)

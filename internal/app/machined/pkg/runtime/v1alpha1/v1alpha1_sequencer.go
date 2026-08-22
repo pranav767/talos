@@ -11,17 +11,17 @@ import (
 	"github.com/siderolabs/go-procfs/procfs"
 
 	"github.com/siderolabs/talos/internal/app/machined/pkg/runtime"
-	"github.com/siderolabs/talos/pkg/imager/profile"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
+	"github.com/siderolabs/talos/pkg/machinery/imager/imageropts"
 	"github.com/siderolabs/talos/pkg/machinery/meta"
 )
 
 // Sequencer implements the sequencer interface.
 type Sequencer struct{}
 
-// NewSequencer intializes and returns a sequencer.
+// NewSequencer initializes and returns a sequencer.
 func NewSequencer() *Sequencer {
 	return &Sequencer{}
 }
@@ -74,6 +74,7 @@ func (*Sequencer) Initialize(r runtime.Runtime) []runtime.Phase {
 	case runtime.ModeContainer:
 		phases = phases.Append(
 			"machined",
+			StartApid,
 			StartMachined,
 			StartContainerd,
 		).Append(
@@ -86,8 +87,9 @@ func (*Sequencer) Initialize(r runtime.Runtime) []runtime.Phase {
 			EnforceKSPPRequirements,
 		).Append(
 			"earlyServices",
-			StartUdevd,
 			StartMachined,
+			WaitForUdevd,
+			StartApid,
 			StartAuditd,
 			StartSyslogd,
 			StartContainerd,
@@ -104,7 +106,7 @@ func (*Sequencer) Initialize(r runtime.Runtime) []runtime.Phase {
 					return false
 				}
 
-				return r.State().Machine().Installed() && val == profile.BootLoaderKindDualBoot.String()
+				return r.State().Machine().Installed() && val == imageropts.BootLoaderKindDualBoot.String()
 			},
 			"cleanupBootloader",
 			CleanupBootloader,
@@ -155,7 +157,21 @@ func (*Sequencer) Install(r runtime.Runtime) []runtime.Phase {
 	case runtime.ModeContainer:
 		return nil
 	default:
-		if !r.State().Machine().Installed() || r.State().Machine().IsInstallStaged() {
+		// When the UnattendedInstallConfig multi-document config is present, install is driven by the
+		// UnattendedInstallController instead of the install sequence (which also reboots). Skip the
+		// sequence entirely so install/reboot is not performed here.
+		if r.Config() != nil && r.Config().UnattendedInstallConfig() != nil {
+			return nil
+		}
+
+		// If no Install config is present, skip the install sequence entirely.
+		if r.Config() != nil &&
+			(r.Config().Machine().Install() == nil && r.Config().UnattendedInstallConfig() == nil) {
+			return nil
+		}
+
+		if !r.State().Machine().Installed() ||
+			r.State().Machine().IsInstallStaged() {
 			phases = phases.Append(
 				"env",
 				SetUserEnvVars,
@@ -168,6 +184,9 @@ func (*Sequencer) Install(r runtime.Runtime) []runtime.Phase {
 			).Append(
 				"saveMeta", // saving META here to merge in-memory changes with the on-disk ones from the installer
 				FlushMeta,
+			).Append(
+				"denyNewServices",
+				DenyNewServices,
 			).Append(
 				"volumeFinalize",
 				TeardownVolumeLifecycle,
@@ -189,7 +208,8 @@ func (*Sequencer) Install(r runtime.Runtime) []runtime.Phase {
 
 // Boot is the boot sequence. This primary goal if this sequence is to apply
 // user supplied settings and start the services for the specific machine type.
-// This sequence should never be reached if an installation is not found.
+// Services are only started when the machine is already installed; otherwise the
+// UnattendedInstallController handles the install and triggers the reboot.
 func (*Sequencer) Boot(r runtime.Runtime) []runtime.Phase {
 	phases := PhaseList{}
 
@@ -215,8 +235,8 @@ func (*Sequencer) Boot(r runtime.Runtime) []runtime.Phase {
 		MountEphemeralPartition,
 	).AppendWhen(
 		r.State().Platform().Mode() != runtime.ModeContainer,
-		"udevSetup",
-		WriteUdevRules,
+		"promotableVolumes",
+		MountPromotableSystemPartitions,
 	).AppendWhen(
 		r.State().Platform().Mode() != runtime.ModeContainer,
 		"userDisks",
@@ -279,6 +299,8 @@ func (*Sequencer) Reset(r runtime.Runtime, in runtime.ResetOptions) []runtime.Ph
 		resetSystemDisk = true
 	}
 
+	skipNodeRegistration := r.Config() != nil && r.Config().K8sNodeConfig() != nil && r.Config().K8sNodeConfig().SkipNodeRegistration()
+
 	switch r.State().Platform().Mode() { //nolint:exhaustive
 	case runtime.ModeContainer:
 		phases = phases.AppendList(stopAllPhaselist(r, false)).
@@ -288,7 +310,7 @@ func (*Sequencer) Reset(r runtime.Runtime, in runtime.ResetOptions) []runtime.Ph
 			)
 	default:
 		phases = phases.AppendWhen(
-			in.GetGraceful() && !r.Config().Machine().Kubelet().SkipNodeRegistration(),
+			in.GetGraceful() && !skipNodeRegistration,
 			"drain",
 			taskErrorHandler(logError, CordonAndDrainNode),
 		).AppendWhen(
@@ -342,7 +364,7 @@ func (*Sequencer) Reset(r runtime.Runtime, in runtime.ResetOptions) []runtime.Ph
 
 // Shutdown is the shutdown sequence.
 func (*Sequencer) Shutdown(r runtime.Runtime, in *machineapi.ShutdownRequest) []runtime.Phase {
-	skipNodeRegistration := r.Config() != nil && r.Config().Machine() != nil && r.Config().Machine().Kubelet().SkipNodeRegistration()
+	skipNodeRegistration := r.Config() != nil && r.Config().K8sNodeConfig() != nil && r.Config().K8sNodeConfig().SkipNodeRegistration()
 
 	phases := PhaseList{}.Append(
 		"storeShutdown",
@@ -423,12 +445,17 @@ func (*Sequencer) MaintenanceUpgrade(r runtime.Runtime, in *machineapi.UpgradeRe
 func (*Sequencer) Upgrade(r runtime.Runtime, in *machineapi.UpgradeRequest) []runtime.Phase {
 	phases := PhaseList{}
 
+	skipNodeRegistration := r.Config() != nil && r.Config().K8sNodeConfig() != nil && r.Config().K8sNodeConfig().SkipNodeRegistration()
+
 	switch r.State().Platform().Mode() { //nolint:exhaustive
 	case runtime.ModeContainer:
 		return nil
 	default:
-		phases = phases.AppendWhen(
-			!r.Config().Machine().Kubelet().SkipNodeRegistration(),
+		phases = phases.Append(
+			"denyNewServices",
+			DenyNewServices,
+		).AppendWhen(
+			!skipNodeRegistration,
 			"drain",
 			CordonAndDrainNode,
 		).Append(
@@ -446,6 +473,9 @@ func (*Sequencer) Upgrade(r runtime.Runtime, in *machineapi.UpgradeRequest) []ru
 		).Append(
 			"unmountBind",
 			UnmountSystemDiskBindMounts,
+		).Append(
+			"unmountPromotable",
+			UnmountPromotableSystemPartitions,
 		).Append(
 			"unmountSystem",
 			UnmountEphemeralPartition,
@@ -485,6 +515,9 @@ func stopAllPhaselist(r runtime.Runtime, enableKexec bool) PhaseList {
 		)
 	default:
 		phases = phases.Append(
+			"denyNewServices",
+			DenyNewServices,
+		).Append(
 			"stopServices",
 			StopServicesEphemeral,
 		).Append(
@@ -493,6 +526,9 @@ func stopAllPhaselist(r runtime.Runtime, enableKexec bool) PhaseList {
 		).Append(
 			"unmountBind",
 			UnmountSystemDiskBindMounts,
+		).Append(
+			"unmountPromotable",
+			UnmountPromotableSystemPartitions,
 		).Append(
 			"unmountSystem",
 			UnmountEphemeralPartition,
@@ -506,6 +542,42 @@ func stopAllPhaselist(r runtime.Runtime, enableKexec bool) PhaseList {
 		).Append(
 			"stopEverything",
 			StopAllServices,
+		)
+	}
+
+	return phases
+}
+
+// EmergencyVolumeCleanup is the emergency volume cleanup sequence.
+//
+// This sequence runs the essential volume cleanup phases with a short timeout
+// to properly unmount and tear down volumes before an emergency reboot.
+// It is invoked when a fatal error occurs during normal sequence execution.
+func (*Sequencer) EmergencyVolumeCleanup(r runtime.Runtime) []runtime.Phase {
+	phases := PhaseList{}
+
+	switch r.State().Platform().Mode() { //nolint:exhaustive
+	case runtime.ModeContainer:
+		// no volume cleanup needed in container mode
+	default:
+		phases = phases.Append(
+			"denyNewServices",
+			DenyNewServices,
+		).Append(
+			"umount",
+			UnmountPodMounts,
+		).Append(
+			"unmountBind",
+			UnmountSystemDiskBindMounts,
+		).Append(
+			"unmountPromotable",
+			UnmountPromotableSystemPartitions,
+		).Append(
+			"unmountSystem",
+			UnmountEphemeralPartition,
+		).Append(
+			"volumeFinalize",
+			TeardownVolumeLifecycle,
 		)
 	}
 

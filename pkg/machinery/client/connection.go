@@ -22,8 +22,10 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
+	"github.com/siderolabs/talos/pkg/machinery/client/dialer"
 	"github.com/siderolabs/talos/pkg/machinery/client/resolver"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
+	"github.com/siderolabs/talos/pkg/machinery/version"
 )
 
 // Conn returns underlying client connection.
@@ -38,7 +40,8 @@ func (c *Client) getConn(opts ...grpc.DialOption) (*grpcConnectionWrapper, error
 	target := c.getTarget(
 		resolver.EnsureEndpointsHavePorts(
 			reduceURLsToAddresses(endpoints),
-			constants.ApidPort),
+			constants.ApidPort,
+		),
 	)
 
 	dialOpts := slices.Concat(
@@ -48,14 +51,14 @@ func (c *Client) getConn(opts ...grpc.DialOption) (*grpcConnectionWrapper, error
 				// grpc.UseCompressor(gzip.Name),
 				grpc.MaxCallRecvMsgSize(constants.GRPCMaxMessageSize),
 			),
-			grpc.WithSharedWriteBuffer(true),
 		},
 		c.options.grpcDialOptions,
 		opts,
 	)
 
 	if c.options.unixSocketPath != "" {
-		dialOpts = append(dialOpts,
+		dialOpts = append(
+			dialOpts,
 			grpc.WithNoProxy(),
 		)
 
@@ -72,6 +75,10 @@ func (c *Client) getConn(opts ...grpc.DialOption) (*grpcConnectionWrapper, error
 
 	if err := c.resolveConfigContext(); err != nil {
 		return nil, fmt.Errorf("failed to resolve configuration context: %w", err)
+	}
+
+	if proxyURL := c.options.configContext.ProxyURL; proxyURL != "" {
+		dialOpts = append(dialOpts, grpc.WithContextDialer(dialer.ForProxyURL(proxyURL)))
 	}
 
 	basicAuth := c.options.configContext.Auth.Basic
@@ -92,13 +99,15 @@ func (c *Client) getConn(opts ...grpc.DialOption) (*grpcConnectionWrapper, error
 		}
 
 		authInterceptor := interceptor.New(interceptor.Options{
-			UserKeyProvider: getKeyProvider(c.options.sideroV1KeysDir),
-			ContextName:     contextName,
-			Identity:        sideroV1.Identity,
-			ClientName:      "Talos",
+			UserKeyProvider:      getKeyProvider(c.options.sideroV1KeysDir),
+			ContextName:          contextName,
+			Identity:             sideroV1.Identity,
+			ClientName:           version.Name,
+			ServiceAccountBase64: c.options.serviceAccountBase64,
 		})
 
-		dialOpts = append(dialOpts,
+		dialOpts = append(
+			dialOpts,
 			grpc.WithUnaryInterceptor(authInterceptor.Unary()),
 			grpc.WithStreamInterceptor(authInterceptor.Stream()),
 		)

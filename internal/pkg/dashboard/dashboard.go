@@ -16,18 +16,13 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	_ "github.com/gdamore/tcell/v2/terminfo/l/linux" // linux terminal is used when running on the machine, but not included with tcell_minimal
-	"github.com/gizak/termui/v3"
 	"github.com/rivo/tview"
-	"github.com/siderolabs/gen/maps"
 	"github.com/siderolabs/gen/xslices"
-	"github.com/siderolabs/go-api-signature/pkg/message"
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/grpc/metadata"
 
 	"github.com/siderolabs/talos/internal/pkg/dashboard/apidata"
 	"github.com/siderolabs/talos/internal/pkg/dashboard/components"
 	"github.com/siderolabs/talos/internal/pkg/dashboard/logdata"
-	"github.com/siderolabs/talos/internal/pkg/dashboard/resolver"
 	"github.com/siderolabs/talos/internal/pkg/dashboard/resourcedata"
 	"github.com/siderolabs/talos/pkg/machinery/client"
 )
@@ -35,9 +30,6 @@ import (
 func init() {
 	// set background to be left as the default color of the terminal
 	tview.Styles.PrimitiveBackgroundColor = tcell.ColorDefault
-
-	// set the titles of the termui (legacy) to be bold
-	termui.Theme.Block.Title.Modifier = termui.ModifierBold
 }
 
 // Screen is a dashboard screen.
@@ -57,6 +49,9 @@ const (
 
 	// ScreenConfigURL is the config URL screen.
 	ScreenConfigURL Screen = "Config URL"
+
+	// ScreenResourceExplorer is the resource explorer screen.
+	ScreenResourceExplorer Screen = "Resources"
 )
 
 // APIDataListener is a listener which is notified when API-sourced data is updated.
@@ -130,7 +125,6 @@ type Dashboard struct {
 	selectedNode      string
 	paused            bool
 	nodeSet           map[string]struct{}
-	ipsToNodeAliases  map[string]string
 	nodes             []string
 }
 
@@ -138,28 +132,20 @@ type Dashboard struct {
 //
 //nolint:gocyclo,cyclop
 func buildDashboard(ctx context.Context, cli *client.Client, opts ...Option) (*Dashboard, error) {
-	defOptions := defaultOptions()
+	options := defaultOptions()
 
 	for _, opt := range opts {
-		opt(defOptions)
+		opt(options)
 	}
 
-	// map node IPs to their aliases (names/IPs - as specified "nodes" in context).
-	// this will also trigger the interactive API authentication if needed - e.g., when the API is used through Omni.
-	ipsToNodeAliases, err := collectNodeIPsToNodeAliases(ctx, cli)
-	if err != nil {
-		return nil, err
-	}
-
-	nodes := getSortedNodeAliases(ipsToNodeAliases)
+	nodes := getSortedNodeAliases(options.nodes)
 
 	dashboard := &Dashboard{
-		cli:              cli,
-		interval:         defOptions.interval,
-		app:              tview.NewApplication(),
-		nodeSet:          make(map[string]struct{}),
-		nodes:            nodes,
-		ipsToNodeAliases: ipsToNodeAliases,
+		cli:      cli,
+		interval: options.interval,
+		app:      tview.NewApplication(),
+		nodeSet:  make(map[string]struct{}),
+		nodes:    nodes,
 	}
 
 	dashboard.mainGrid = tview.NewGrid().
@@ -168,12 +154,13 @@ func buildDashboard(ctx context.Context, cli *client.Client, opts ...Option) (*D
 
 	dashboard.pages = tview.NewPages().AddPage(pageMain, dashboard.mainGrid, true, true)
 
+	dashboard.app.EnableMouse(true)
 	dashboard.app.SetRoot(dashboard.pages, true).SetFocus(dashboard.pages)
 
 	header := components.NewHeader()
 	dashboard.mainGrid.AddItem(header, 0, 0, 1, 1, 0, 0, false)
 
-	if err = dashboard.initScreenConfigs(ctx, defOptions.screens); err != nil {
+	if err := dashboard.initScreenConfigs(ctx, options.screens); err != nil {
 		return nil, err
 	}
 
@@ -187,25 +174,49 @@ func buildDashboard(ctx context.Context, cli *client.Client, opts ...Option) (*D
 
 	dashboard.footer = components.NewFooter(screenKeyToName, nodes)
 
+	dashboard.footer.NodeClick = func(node string) {
+		allowNodeNavigation := dashboard.selectedScreenConfig != nil && dashboard.selectedScreenConfig.allowNodeNavigation
+		if !allowNodeNavigation {
+			return
+		}
+
+		for i, n := range dashboard.nodes {
+			if n == node {
+				dashboard.selectNodeByIndex(i)
+
+				break
+			}
+		}
+	}
+
+	dashboard.footer.ScreenClick = func(screenName string) {
+		dashboard.selectScreen(Screen(screenName))
+	}
+
 	dashboard.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		config, screenOk := screenConfigByKeyCode[event.Key()]
 
 		allowNodeNavigation := dashboard.selectedScreenConfig != nil && dashboard.selectedScreenConfig.allowNodeNavigation
+
+		// When a text input field has focus, pass all printable-character keys
+		// and navigation keys through so the field can consume them. Only global
+		// shortcuts (Ctrl+Z, Ctrl+C, function-key screen switches) remain active.
+		_, focusedIsInput := dashboard.app.GetFocus().(*tview.InputField)
 
 		switch {
 		case screenOk:
 			dashboard.selectScreen(config.screen)
 
 			return nil
-		case allowNodeNavigation && (event.Key() == tcell.KeyLeft || event.Rune() == 'h'):
+		case !focusedIsInput && allowNodeNavigation && (event.Key() == tcell.KeyLeft || event.Rune() == 'h'):
 			dashboard.selectNodeByIndex(dashboard.selectedNodeIndex - 1)
 
 			return nil
-		case allowNodeNavigation && (event.Key() == tcell.KeyRight || event.Rune() == 'l'):
+		case !focusedIsInput && allowNodeNavigation && (event.Key() == tcell.KeyRight || event.Rune() == 'l'):
 			dashboard.selectNodeByIndex(dashboard.selectedNodeIndex + 1)
 
 			return nil
-		case defOptions.allowExitKeys && (event.Key() == tcell.KeyCtrlC || event.Rune() == 'q'):
+		case !focusedIsInput && options.allowExitKeys && (event.Key() == tcell.KeyCtrlC || event.Rune() == 'q'):
 			dashboard.app.Stop()
 
 			return nil
@@ -264,19 +275,18 @@ func buildDashboard(ctx context.Context, cli *client.Client, opts ...Option) (*D
 		}
 	}
 
-	nodeResolver := resolver.New(ipsToNodeAliases)
-
 	dashboard.apiDataSource = &apidata.Source{
 		Client:   cli,
-		Interval: defOptions.interval,
-		Resolver: nodeResolver,
+		Interval: options.interval,
+		Nodes:    nodes,
 	}
 
 	dashboard.resourceDataSource = &resourcedata.Source{
-		COSI: cli.COSI,
+		COSI:  cli.COSI,
+		Nodes: nodes,
 	}
 
-	dashboard.logDataSource = logdata.NewSource(cli, nodeResolver)
+	dashboard.logDataSource = logdata.NewSource(cli, nodes)
 
 	return dashboard, nil
 }
@@ -292,6 +302,8 @@ func (d *Dashboard) initScreenConfigs(ctx context.Context, screens []Screen) err
 			return NewNetworkConfigGrid(ctx, d)
 		case ScreenConfigURL:
 			return NewConfigURLGrid(ctx, d)
+		case ScreenResourceExplorer:
+			return NewResourceExplorerGrid(ctx, d)
 		default:
 			return nil
 		}
@@ -401,8 +413,6 @@ func (d *Dashboard) startDataHandler(ctx context.Context) func() error {
 		d.logDataSource.Start(ctx)
 		defer d.logDataSource.Stop() //nolint:errcheck
 
-		lastLogTime := time.Now()
-
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
@@ -411,28 +421,37 @@ func (d *Dashboard) startDataHandler(ctx context.Context) func() error {
 			case <-ctx.Done():
 				return ctx.Err()
 			case nodeLog := <-d.logDataSource.LogCh:
-				if time.Since(lastLogTime) < 50*time.Millisecond {
-					d.app.QueueUpdate(func() {
-						d.processLog(nodeLog.Node, nodeLog.Log, nodeLog.Error)
-					})
-				} else {
-					d.app.QueueUpdateDraw(func() {
-						d.processLog(nodeLog.Node, nodeLog.Log, nodeLog.Error)
-					})
+				// Drain any additional log lines that are immediately available,
+				// so a burst of logs produces one closure instead of one per line.
+				logs := []logdata.Data{nodeLog}
+
+			drainLogs:
+				for {
+					select {
+					case nl := <-d.logDataSource.LogCh:
+						logs = append(logs, nl)
+					default:
+						break drainLogs
+					}
 				}
 
-				lastLogTime = time.Now()
+				d.app.QueueUpdate(func() {
+					for _, l := range logs {
+						d.processLog(l.Node, l.Log, l.Error)
+					}
+				})
 			case d.data = <-dataCh:
-				d.app.QueueUpdateDraw(func() {
+				d.app.QueueUpdate(func() {
 					if !d.paused {
 						d.processAPIData()
 					}
 				})
 			case nodeResource := <-d.resourceDataSource.NodeResourceCh:
-				d.app.QueueUpdateDraw(func() {
+				d.app.QueueUpdate(func() {
 					d.processNodeResource(nodeResource)
 				})
 			case <-ticker.C:
+				// Only the ticker triggers a full redraw, capping redraws at 2 fps.
 				d.app.QueueUpdateDraw(func() {
 					if !d.paused {
 						d.processTick()
@@ -501,7 +520,7 @@ func (d *Dashboard) processTick() {
 func (d *Dashboard) selectScreen(screen Screen) {
 	for _, info := range d.screenConfigs {
 		if info.screen == screen {
-			d.selectedScreenConfig = &info //nolint:exportloopref
+			d.selectedScreenConfig = &info
 
 			d.mainGrid.AddItem(info.primitive, 1, 0, 1, 1, 0, 0, false)
 
@@ -517,71 +536,8 @@ func (d *Dashboard) selectScreen(screen Screen) {
 	d.footer.SelectScreen(string(screen))
 }
 
-// collectNodeIPsToNodeAliases probes all nodes in the context for their IP addresses by calling their .Version endpoint and maps them to the node aliases in the context.
-//
-// Sample output:
-//
-// 172.20.0.6 -> node-1
-//
-// 10.42.0.1 -> node-1
-//
-// 172.20.0.7 -> node-2
-//
-// 10.42.0.2 -> node-2.
-func collectNodeIPsToNodeAliases(ctx context.Context, c *client.Client) (map[string]string, error) {
-	ipsToNodeAliases := make(map[string]string)
-
-	nodes := nodeAliasesInContext(ctx)
-	for _, node := range nodes {
-		ctx = client.WithNodes(ctx, node) //nolint:fatcontext // do not replace this with "WithNode" - it would not return the IP in the response metadata
-
-		resp, err := c.Version(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get node %q version: %w", node, err)
-		}
-
-		if len(resp.GetMessages()) == 0 {
-			return nil, fmt.Errorf("node %q returned no messages in version response", node)
-		}
-
-		nodeIP := resp.GetMessages()[0].GetMetadata().GetHostname()
-		if nodeIP == "" {
-			return nil, fmt.Errorf("node %q returned no IP in version response", node)
-		}
-
-		ipsToNodeAliases[nodeIP] = node
-	}
-
-	return ipsToNodeAliases, nil
-}
-
-// nodeAliasesInContext extracts the node aliases (IP, name etc.) from the given context which are stored in the "node" or "nodes" GRPC metadata.
-func nodeAliasesInContext(ctx context.Context) []string {
-	md, mdOk := metadata.FromOutgoingContext(ctx)
-	if !mdOk {
-		return nil
-	}
-
-	nodeVal := md.Get("node")
-	if len(nodeVal) > 0 {
-		return []string{nodeVal[0]}
-	}
-
-	nodesVal := md.Get(message.NodesHeaderKey)
-
-	return xslices.FlatMap(nodesVal, func(node string) []string {
-		return strings.Split(node, ",")
-	})
-}
-
 // getSortedNodeAliases returns the unique node aliases sorted by their IP address.
-func getSortedNodeAliases(ipToNodeAliases map[string]string) []string {
-	if len(ipToNodeAliases) == 0 { // assume that it is the local node (running on TTY)
-		return []string{""}
-	}
-
-	nodeAliases := maps.Keys(xslices.ToSet(maps.Values(ipToNodeAliases))) // eliminate duplicates
-
+func getSortedNodeAliases(nodeAliases []string) []string {
 	// if the aliases are IP addresses, compare them as IPs
 	// otherwise, compare them as strings
 	// all IPs come before non-IPs

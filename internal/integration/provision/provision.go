@@ -10,24 +10,34 @@ package provision
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cosi-project/runtime/pkg/safe"
+	"github.com/google/uuid"
 	"github.com/siderolabs/gen/xslices"
 	"github.com/siderolabs/go-blockdevice/v2/encryption"
+	"github.com/siderolabs/go-kubernetes/kubernetes/ssa"
 	"github.com/siderolabs/go-kubernetes/kubernetes/upgrade"
-	"github.com/siderolabs/go-pointer"
 	"github.com/siderolabs/go-procfs/procfs"
 	"github.com/siderolabs/go-retry/retry"
 	sideronet "github.com/siderolabs/net"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"go.yaml.in/yaml/v4"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -37,9 +47,11 @@ import (
 	"github.com/siderolabs/talos/pkg/cluster/check"
 	"github.com/siderolabs/talos/pkg/cluster/hydrophone"
 	"github.com/siderolabs/talos/pkg/cluster/kubernetes"
+	"github.com/siderolabs/talos/pkg/machinery/api/common"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
+	"github.com/siderolabs/talos/pkg/machinery/client/multiplex"
 	"github.com/siderolabs/talos/pkg/machinery/config"
 	"github.com/siderolabs/talos/pkg/machinery/config/bundle"
 	"github.com/siderolabs/talos/pkg/machinery/config/configpatcher"
@@ -56,6 +68,7 @@ import (
 	"github.com/siderolabs/talos/pkg/provision"
 	"github.com/siderolabs/talos/pkg/provision/access"
 	"github.com/siderolabs/talos/pkg/provision/providers/qemu"
+	"github.com/siderolabs/talos/pkg/provision/siderolinkbuilder"
 )
 
 var allSuites []suite.TestingSuite
@@ -86,8 +99,6 @@ type Settings struct {
 	TargetInstallImageRegistry string
 	// Current version of the cluster (built in the CI pass)
 	CurrentVersion string
-	// Custom CNI URL to use.
-	CustomCNIURL string
 	// CNI bundle for QEMU provisioner.
 	CNIBundleURL string
 }
@@ -118,6 +129,13 @@ type BaseSuite struct {
 	base.TalosSuite
 
 	provisioner provision.Provisioner
+
+	controlplaneUUIDs []uuid.UUID
+	workerUUIDs       []uuid.UUID
+
+	slb                       *siderolinkbuilder.SiderolinkBuilder
+	controlplaneSideroLinkIPs []netip.Addr
+	workerSideroLinkIPs       []netip.Addr
 
 	configBundle *bundle.Bundle
 
@@ -150,7 +168,18 @@ func (suite *BaseSuite) TearDownSuite() {
 	}
 
 	if suite.Cluster != nil {
-		suite.Assert().NoError(suite.provisioner.Destroy(suite.ctx, suite.Cluster))
+		// Save logs and support archives under /tmp/{logs,support}-<cluster>.{tar.gz,zip}
+		// so the kres save-talos-logs step (artifactPath: /tmp/logs-*.tar.gz,
+		// additionalArtifacts: /tmp/support-*.zip) can upload them on failure.
+		clusterName := suite.Cluster.Info().ClusterName
+
+		suite.Assert().NoError(
+			suite.provisioner.Destroy(
+				suite.ctx, suite.Cluster,
+				provision.WithSaveClusterLogsArchivePath(fmt.Sprintf("/tmp/logs-%s.tar.gz", clusterName)),
+				provision.WithSaveSupportArchivePath(fmt.Sprintf("/tmp/support-%s.zip", clusterName)),
+			),
+		)
 	}
 
 	suite.ctxCancel()
@@ -233,29 +262,27 @@ func (suite *BaseSuite) untaint(name string) {
 
 func (suite *BaseSuite) assertSameVersionCluster(client *talosclient.Client, expectedVersion string) {
 	nodes := xslices.Map(suite.Cluster.Info().Nodes, func(node provision.NodeInfo) string { return node.IPs[0].String() })
-	ctx := talosclient.WithNodes(suite.ctx, nodes...)
 
-	var v *machineapi.VersionResponse
+	suite.Assert().EventuallyWithT(
+		func(collect *assert.CollectT) {
+			asrt := assert.New(collect)
 
-	err := retry.Constant(
-		time.Minute,
-	).Retry(
-		func() error {
-			var e error
+			respCh := multiplex.Unary(
+				suite.ctx, nodes,
+				func(ctx context.Context) (*machineapi.VersionResponse, error) {
+					return client.Version(ctx)
+				},
+			)
 
-			v, e = client.Version(ctx)
-
-			return retry.ExpectedError(e)
+			for resp := range respCh {
+				if asrt.NoError(resp.Err, "error getting version from node %s: %v", resp.Node, resp.Err) {
+					asrt.Equal(expectedVersion, resp.Payload.Messages[0].Version.Tag, "unexpected version from node %s", resp.Node)
+				}
+			}
 		},
+		time.Minute,
+		time.Second,
 	)
-
-	suite.Require().NoError(err)
-
-	suite.Require().Len(v.Messages, len(nodes))
-
-	for _, version := range v.Messages {
-		suite.Assert().Equal(expectedVersion, version.Version.Tag)
-	}
 }
 
 func (suite *BaseSuite) assertCmdlineContains(client *talosclient.Client, node string, expectedCmdlineContains string) {
@@ -287,19 +314,287 @@ func (suite *BaseSuite) readVersion(nodeCtx context.Context, client *talosclient
 
 type upgradeOptions struct {
 	TargetInstallerImage string
-	UpgradeStage         bool
-	TargetVersion        string
+	// Deprecated: staged upgrades are not supported by the new LifecycleService API.
+	// Use the legacy MachineService.Upgrade path instead.
+	UpgradeStage  bool
+	TargetVersion string
+	// Use in-memory containerd: in general we should prefer to use CRI containerd,
+	// but we should use in-memory for 'enforcing' mode due to SELinux restrictions.
+	//
+	// Ignored for legacy upgrade paths (before 1.13).
+	UpgradeUseInmemoryContainerd bool
 }
 
-//nolint:gocyclo
+//nolint:gocyclo,cyclop
 func (suite *BaseSuite) upgradeNode(client *talosclient.Client, node provision.NodeInfo, options upgradeOptions) {
 	suite.T().Logf("upgrading node %s", node.IPs[0])
 
 	ctx, cancel := context.WithCancel(suite.ctx)
 	defer cancel()
 
-	nodeCtx := talosclient.WithNodes(ctx, node.IPs[0].String())
+	nodeCtx := talosclient.WithNode(ctx, node.IPs[0].String())
 
+	// Staged upgrades are not supported by the new LifecycleService API,
+	// so skip straight to the legacy path.
+	if !options.UpgradeStage {
+		if suite.tryUpgradeViaLifecycleService(nodeCtx, client, node, options) {
+			// LifecycleService.Upgrade succeeded — trigger reboot and wait.
+			suite.T().Logf("upgrade via LifecycleService succeeded, rebooting node %s", node.IPs[0])
+
+			suite.Require().NoError(client.Reboot(nodeCtx))
+			suite.waitForUpgrade(nodeCtx, client, node, options)
+
+			return
+		}
+
+		suite.T().Logf("LifecycleService.Upgrade not available, falling back to legacy MachineService.Upgrade")
+	}
+
+	// Legacy path: MachineService.Upgrade (handles image pull, install, and reboot in one call).
+	suite.upgradeNodeLegacy(nodeCtx, client, options)
+	suite.waitForUpgrade(nodeCtx, client, node, options)
+}
+
+// tryUpgradeViaLifecycleService attempts to upgrade via the new streaming
+// LifecycleService.Upgrade API. It pre-pulls the installer image, then calls
+// the streaming RPC. Returns true on success, false if the server returned
+// codes.Unimplemented (indicating the API is not available).
+//
+//nolint:gocyclo
+func (suite *BaseSuite) tryUpgradeViaLifecycleService(
+	nodeCtx context.Context,
+	c *talosclient.Client,
+	node provision.NodeInfo,
+	options upgradeOptions,
+) bool {
+	// Step 1: Pre-pull the installer image into the system containerd namespace.
+	suite.T().Logf("pre-pulling installer image %q on node %s", options.TargetInstallerImage, node.IPs[0])
+
+	containerdInstance := &common.ContainerdInstance{
+		Driver:    common.ContainerDriver_CRI,
+		Namespace: common.ContainerdNamespace_NS_SYSTEM,
+	}
+
+	if options.UpgradeUseInmemoryContainerd {
+		containerdInstance.Driver = common.ContainerDriver_CONTAINERD
+	}
+
+	nodes := []string{node.IPs[0].String()}
+
+	if !suite.pullInstallerImageViaLifecycleService(nodeCtx, c, containerdInstance, nodes, options.TargetInstallerImage) {
+		return false
+	}
+
+	if !suite.upgradeViaLifecycleService(nodeCtx, c, containerdInstance, nodes, options.TargetInstallerImage) {
+		return false
+	}
+
+	return true
+}
+
+type provisionStreamResponse[ResponseT any] struct {
+	Node    string
+	Payload *ResponseT
+	Err     error
+}
+
+func streamPerNode[ResponseT any](
+	ctx context.Context,
+	nodes []string,
+	initiate func(context.Context) (grpc.ServerStreamingClient[ResponseT], error),
+) <-chan provisionStreamResponse[ResponseT] {
+	responseCh := make(chan provisionStreamResponse[ResponseT])
+
+	var wg sync.WaitGroup
+
+	wg.Add(len(nodes))
+
+	for _, node := range nodes {
+		go func() {
+			defer wg.Done()
+
+			stream, err := initiate(talosclient.WithNode(ctx, node))
+			if err != nil {
+				sendProvisionResponse(ctx, responseCh, provisionStreamResponse[ResponseT]{
+					Node: node,
+					Err:  err,
+				})
+
+				return
+			}
+
+			for {
+				payload, err := stream.Recv()
+				if err != nil {
+					if errors.Is(err, io.EOF) {
+						return
+					}
+
+					sendProvisionResponse(ctx, responseCh, provisionStreamResponse[ResponseT]{
+						Node: node,
+						Err:  err,
+					})
+
+					return
+				}
+
+				if !sendProvisionResponse(ctx, responseCh, provisionStreamResponse[ResponseT]{
+					Node:    node,
+					Payload: payload,
+				}) {
+					return
+				}
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(responseCh)
+	}()
+
+	return responseCh
+}
+
+func sendProvisionResponse[ResponseT any](
+	ctx context.Context,
+	responseCh chan<- provisionStreamResponse[ResponseT],
+	resp provisionStreamResponse[ResponseT],
+) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case responseCh <- resp:
+		return true
+	}
+}
+
+func (suite *BaseSuite) pullInstallerImageViaLifecycleService(
+	ctx context.Context,
+	c *talosclient.Client,
+	containerdInstance *common.ContainerdInstance,
+	nodes []string,
+	imageRef string,
+) bool {
+	responseChan := streamPerNode(
+		ctx, nodes,
+		func(ctx context.Context) (grpc.ServerStreamingClient[machineapi.ImageServicePullResponse], error) {
+			return c.ImageClient.Pull(ctx, &machineapi.ImageServicePullRequest{
+				Containerd: containerdInstance,
+				ImageRef:   imageRef,
+			})
+		},
+	)
+
+	var (
+		finishedPulls = map[string]string{}
+		errs          error
+	)
+
+	for resp := range responseChan {
+		if resp.Err != nil {
+			if status.Code(resp.Err) == codes.Unimplemented {
+				return false
+			}
+
+			errs = errors.Join(errs, fmt.Errorf("error from node %s: %w", resp.Node, resp.Err))
+
+			continue
+		}
+
+		if resp.Payload == nil {
+			errs = errors.Join(errs, fmt.Errorf("empty image pull response from node %s", resp.Node))
+
+			continue
+		}
+
+		switch payload := resp.Payload.Response.(type) {
+		case *machineapi.ImageServicePullResponse_Name:
+			finishedPulls[resp.Node] = payload.Name
+		case *machineapi.ImageServicePullResponse_PullProgress:
+		default:
+			errs = errors.Join(errs, fmt.Errorf("unexpected image pull response type from node %s: %T", resp.Node, payload))
+		}
+	}
+
+	suite.Require().NoError(errs, "error during image pull")
+
+	for node, imageName := range finishedPulls {
+		suite.T().Logf("node %s pulled image %s", node, imageName)
+	}
+
+	return true
+}
+
+func (suite *BaseSuite) upgradeViaLifecycleService(
+	ctx context.Context,
+	c *talosclient.Client,
+	containerdInstance *common.ContainerdInstance,
+	nodes []string,
+	imageRef string,
+) bool {
+	responseChan := streamPerNode(
+		ctx, nodes,
+		func(ctx context.Context) (grpc.ServerStreamingClient[machineapi.LifecycleServiceUpgradeResponse], error) {
+			return c.LifecycleClient.Upgrade(ctx, &machineapi.LifecycleServiceUpgradeRequest{
+				Containerd: containerdInstance,
+				Source: &machineapi.InstallArtifactsSource{
+					ImageName: imageRef,
+				},
+			})
+		},
+	)
+
+	var (
+		exitCodes = map[string]int32{}
+		errs      error
+	)
+
+	for resp := range responseChan {
+		if resp.Err != nil {
+			if status.Code(resp.Err) == codes.Unimplemented {
+				return false
+			}
+
+			errs = errors.Join(errs, fmt.Errorf("error from node %s: %w", resp.Node, resp.Err))
+
+			continue
+		}
+
+		if resp.Payload == nil {
+			errs = errors.Join(errs, fmt.Errorf("empty upgrade response from node %s", resp.Node))
+
+			continue
+		}
+
+		switch payload := resp.Payload.GetProgress().GetResponse().(type) {
+		case *machineapi.LifecycleServiceInstallProgress_Message:
+			suite.T().Logf("upgrade log (%s): %s", resp.Node, payload.Message)
+		case *machineapi.LifecycleServiceInstallProgress_ExitCode:
+			exitCodes[resp.Node] = payload.ExitCode
+		default:
+			errs = errors.Join(errs, fmt.Errorf("unexpected upgrade response type from node %s: %T", resp.Node, payload))
+		}
+	}
+
+	suite.Require().NoError(errs, "error during LifecycleService.Upgrade")
+
+	for node, exitCode := range exitCodes {
+		suite.Require().Equalf(int32(0), exitCode, "LifecycleService.Upgrade exited with non-zero code on node %s", node)
+	}
+
+	return true
+}
+
+// upgradeNodeLegacy performs an upgrade using the legacy (deprecated) MachineService.Upgrade
+// unary API, which handles image pull, install, and reboot in a single call.
+//
+//nolint:gocyclo
+func (suite *BaseSuite) upgradeNodeLegacy(
+	nodeCtx context.Context,
+	c *talosclient.Client,
+	options upgradeOptions,
+) {
 	var (
 		resp *machineapi.UpgradeResponse
 		err  error
@@ -307,7 +602,7 @@ func (suite *BaseSuite) upgradeNode(client *talosclient.Client, node provision.N
 
 	err = retry.Constant(time.Minute, retry.WithUnits(10*time.Second)).Retry(
 		func() error {
-			resp, err = client.Upgrade(
+			resp, err = c.Upgrade( //nolint:staticcheck // using deprecated API for testing backward compatibility
 				nodeCtx,
 				options.TargetInstallerImage,
 				options.UpgradeStage,
@@ -337,7 +632,7 @@ func (suite *BaseSuite) upgradeNode(client *talosclient.Client, node provision.N
 	eventCh := make(chan talosclient.EventResult)
 
 	// watch for events
-	suite.Require().NoError(client.EventsWatchV2(nodeCtx, eventCh, talosclient.WithActorID(actorID), talosclient.WithTailEvents(-1)))
+	suite.Require().NoError(c.EventsWatchV2(nodeCtx, eventCh, talosclient.WithActorID(actorID), talosclient.WithTailEvents(-1)))
 
 	waitTimer := time.NewTimer(5 * time.Minute)
 	defer waitTimer.Stop()
@@ -365,21 +660,33 @@ waitLoop:
 			}
 		case <-waitTimer.C:
 			suite.FailNow("timeout waiting for upgrade to finish")
-		case <-ctx.Done():
+		case <-nodeCtx.Done():
 			suite.FailNow("context canceled")
 		}
 	}
+}
 
+// waitForUpgrade waits for the node to come back up after a reboot with the
+// expected target version, then verifies cluster health. This is shared by
+// both the new LifecycleService and the legacy MachineService upgrade paths.
+func (suite *BaseSuite) waitForUpgrade(
+	nodeCtx context.Context,
+	c *talosclient.Client,
+	node provision.NodeInfo,
+	options upgradeOptions,
+) {
 	// wait for the apid to be shut down
 	time.Sleep(10 * time.Second)
 
 	// wait for the version to be equal to target version
+	var err error
+
 	suite.Require().NoError(
 		retry.Constant(10 * time.Minute).Retry(
 			func() error {
 				var version string
 
-				version, err = suite.readVersion(nodeCtx, client)
+				version, err = suite.readVersion(nodeCtx, c)
 				if err != nil {
 					// API might be unresponsive during upgrade
 					return retry.ExpectedError(err)
@@ -430,9 +737,29 @@ func (suite *BaseSuite) upgradeKubernetes(fromVersion, toVersion string, skipKub
 		ProxyImage:             constants.KubeProxyImage,
 
 		EncoderOpt: encoder.WithComments(encoder.CommentsAll),
+
+		InventoryPolicy:  ssa.InventoryPolicyAdoptIfNoInventory,
+		ReconcileTimeout: 3 * time.Minute,
 	}
 
 	suite.Require().NoError(kubernetes.Upgrade(suite.ctx, suite.clusterAccess, options))
+}
+
+func (suite *BaseSuite) sendMonitorCommand(ctx context.Context, nodeName, command string) {
+	statePath, err := suite.Cluster.StatePath()
+	suite.Require().NoError(err)
+
+	socketPath := filepath.Join(statePath, nodeName+".monitor")
+
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+	suite.Require().NoError(err)
+
+	defer func() {
+		suite.Require().NoError(conn.Close())
+	}()
+
+	_, err = conn.Write([]byte(command + "\n"))
+	suite.Require().NoError(err)
 }
 
 type clusterOptions struct {
@@ -451,14 +778,26 @@ type clusterOptions struct {
 	SourceVersion        string
 	SourceK8sVersion     string
 
-	WithEncryption  bool
-	WithBios        bool
-	WithApplyConfig bool
+	// If set, sets the machine config version contract, otherwise
+	// version contract is derived from the SourceVersion.
+	VersionContract *config.VersionContract
+
+	WithEncryption          bool
+	WithTrustedBoot         bool
+	WithBios                bool
+	WithApplyConfig         bool
+	WithSkipInjectingConfig bool
+	WithSideroLink          bool
+
+	// ConfigPatchesControlPlane and ConfigPatchesWorker are applied on top of the generated config of
+	// the respective machine type.
+	ConfigPatchesControlPlane []configpatcher.Patch
+	ConfigPatchesWorker       []configpatcher.Patch
 }
 
 // setupCluster provisions source clusters and waits for health.
 //
-//nolint:gocyclo
+//nolint:gocyclo,cyclop
 func (suite *BaseSuite) setupCluster(options clusterOptions) {
 	defaultStateDir, err := clientconfig.GetTalosDirectory()
 	suite.Require().NoError(err)
@@ -479,6 +818,18 @@ func (suite *BaseSuite) setupCluster(options clusterOptions) {
 	for i := range ips {
 		ips[i], err = sideronet.NthIPInNetwork(cidr, i+2)
 		suite.Require().NoError(err)
+	}
+
+	suite.controlplaneUUIDs = make([]uuid.UUID, options.ControlplaneNodes)
+
+	for i := range options.ControlplaneNodes {
+		suite.controlplaneUUIDs[i] = uuid.New()
+	}
+
+	suite.workerUUIDs = make([]uuid.UUID, options.WorkerNodes)
+
+	for i := range options.WorkerNodes {
+		suite.workerUUIDs[i] = uuid.New()
 	}
 
 	suite.T().Logf("initializing provisioner with cluster name %q, state directory %q", options.ClusterName, suite.stateDir)
@@ -517,8 +868,12 @@ func (suite *BaseSuite) setupCluster(options clusterOptions) {
 
 	suite.controlPlaneEndpoint = suite.provisioner.GetExternalKubernetesControlPlaneEndpoint(request.Network, constants.DefaultControlPlanePort)
 
-	versionContract, err := config.ParseContractFromVersion(options.SourceVersion)
-	suite.Require().NoError(err)
+	versionContract := options.VersionContract
+
+	if versionContract == nil {
+		versionContract, err = config.ParseContractFromVersion(options.SourceVersion)
+		suite.Require().NoError(err)
+	}
 
 	genOptions, bundleOptions := suite.provisioner.GenOptions(request.Network, versionContract)
 
@@ -534,42 +889,44 @@ func (suite *BaseSuite) setupCluster(options clusterOptions) {
 		controlplaneEndpoints[i] = ips[i].String()
 	}
 
-	if DefaultSettings.CustomCNIURL != "" {
-		genOptions = append(
-			genOptions, generate.WithClusterCNIConfig(
-				&v1alpha1.CNIConfig{
-					CNIName: constants.CustomCNI,
-					CNIUrls: []string{DefaultSettings.CustomCNIURL},
-				},
-			),
-		)
-	}
-
 	var extraPatches []configpatcher.Patch
 
 	if options.WithEncryption {
 		if versionContract.VolumeConfigEncryptionSupported() {
 			// use modern encryption config
+			stateKey := block.EncryptionKey{
+				KeySlot:   0,
+				KeyNodeID: &block.EncryptionKeyNodeID{},
+			}
+
+			ephemeralKey := block.EncryptionKey{
+				KeySlot:        0,
+				KeyNodeID:      &block.EncryptionKeyNodeID{},
+				KeyLockToSTATE: new(true),
+			}
+
+			if options.WithTrustedBoot {
+				stateKey = block.EncryptionKey{
+					KeySlot: 0,
+					KeyTPM:  &block.EncryptionKeyTPM{},
+				}
+
+				ephemeralKey = block.EncryptionKey{
+					KeySlot:        0,
+					KeyTPM:         &block.EncryptionKeyTPM{},
+					KeyLockToSTATE: new(true),
+				}
+			}
+
 			stateCfg := block.NewVolumeConfigV1Alpha1()
 			stateCfg.MetaName = constants.StatePartitionLabel
 			stateCfg.EncryptionSpec.EncryptionProvider = blockres.EncryptionProviderLUKS2
-			stateCfg.EncryptionSpec.EncryptionKeys = []block.EncryptionKey{
-				{
-					KeySlot:   0,
-					KeyNodeID: &block.EncryptionKeyNodeID{},
-				},
-			}
+			stateCfg.EncryptionSpec.EncryptionKeys = []block.EncryptionKey{stateKey}
 
 			ephemeralCfg := block.NewVolumeConfigV1Alpha1()
 			ephemeralCfg.MetaName = constants.EphemeralPartitionLabel
 			ephemeralCfg.EncryptionSpec.EncryptionProvider = blockres.EncryptionProviderLUKS2
-			ephemeralCfg.EncryptionSpec.EncryptionKeys = []block.EncryptionKey{
-				{
-					KeySlot:        0,
-					KeyNodeID:      &block.EncryptionKeyNodeID{},
-					KeyLockToSTATE: pointer.To(true),
-				},
-			}
+			ephemeralCfg.EncryptionSpec.EncryptionKeys = []block.EncryptionKey{ephemeralKey}
 
 			ctr, err := container.New(stateCfg, ephemeralCfg)
 			suite.Require().NoError(err)
@@ -614,24 +971,61 @@ func (suite *BaseSuite) setupCluster(options clusterOptions) {
 		}
 	}
 
+	if options.WithSideroLink {
+		suite.slb, err = siderolinkbuilder.New(suite.ctx, gatewayIP.String(), false)
+		suite.Require().NoError(err)
+
+		for uuid := range slices.Values(slices.Concat(suite.controlplaneUUIDs, suite.workerUUIDs)) {
+			suite.Require().NoError(suite.slb.DefineIPv6ForUUID(uuid))
+		}
+
+		request.SiderolinkRequest = suite.slb.SiderolinkRequest()
+
+		suite.controlplaneSideroLinkIPs = make([]netip.Addr, options.ControlplaneNodes)
+
+		for i := range suite.controlplaneSideroLinkIPs {
+			var ok bool
+
+			suite.controlplaneSideroLinkIPs[i], ok = request.SiderolinkRequest.GetAddr(&suite.controlplaneUUIDs[i])
+			suite.Require().True(ok, "failed to get siderolink IP for control plane node %d", i+1)
+		}
+
+		suite.workerSideroLinkIPs = make([]netip.Addr, options.WorkerNodes)
+
+		for i := range suite.workerSideroLinkIPs {
+			var ok bool
+
+			suite.workerSideroLinkIPs[i], ok = request.SiderolinkRequest.GetAddr(&suite.workerUUIDs[i])
+			suite.Require().True(ok, "failed to get siderolink IP for worker node %d", i+1)
+		}
+
+		extraPatches = append(
+			extraPatches,
+			configpatcher.NewStrategicMergePatch(suite.slb.ConfigDocument(false)),
+		)
+	}
+
 	suite.configBundle, err = bundle.NewBundle(
-		append([]bundle.Option{
-			bundle.WithInputOptions(
-				&bundle.InputOptions{
-					ClusterName: options.ClusterName,
-					Endpoint:    suite.controlPlaneEndpoint,
-					KubeVersion: options.SourceK8sVersion,
-					GenOptions: append(
-						genOptions,
-						generate.WithEndpointList(controlplaneEndpoints),
-						generate.WithInstallImage(options.SourceInstallerImage),
-						generate.WithDNSDomain("cluster.local"),
-						generate.WithVersionContract(versionContract),
-					),
-				},
-			),
-			bundle.WithPatch(extraPatches),
-		},
+		append(
+			[]bundle.Option{
+				bundle.WithInputOptions(
+					&bundle.InputOptions{
+						ClusterName: options.ClusterName,
+						Endpoint:    suite.controlPlaneEndpoint,
+						KubeVersion: options.SourceK8sVersion,
+						GenOptions: append(
+							genOptions,
+							generate.WithEndpointList(controlplaneEndpoints),
+							generate.WithInstallImage(options.SourceInstallerImage),
+							generate.WithDNSDomain("cluster.local"),
+							generate.WithVersionContract(versionContract),
+						),
+					},
+				),
+				bundle.WithPatch(extraPatches),
+				bundle.WithPatchControlPlane(options.ConfigPatchesControlPlane),
+				bundle.WithPatchWorker(options.ConfigPatchesWorker),
+			},
 			bundleOptions...,
 		)...,
 	)
@@ -644,6 +1038,7 @@ func (suite *BaseSuite) setupCluster(options clusterOptions) {
 				Name:     fmt.Sprintf("control-plane-%d", i+1),
 				Type:     machine.TypeControlPlane,
 				IPs:      []netip.Addr{ips[i]},
+				UUID:     &suite.controlplaneUUIDs[i],
 				Memory:   DefaultSettings.MemMB * 1024 * 1024,
 				NanoCPUs: DefaultSettings.CPUs * 1000 * 1000 * 1000,
 				Disks: []*provision.Disk{
@@ -651,8 +1046,9 @@ func (suite *BaseSuite) setupCluster(options clusterOptions) {
 						Size: DefaultSettings.DiskGB * 1024 * 1024 * 1024,
 					},
 				},
-				Config:           suite.configBundle.ControlPlane(),
-				SDStubKernelArgs: options.InjectExtraKernelArgs,
+				Config:              suite.configBundle.ControlPlane(),
+				SDStubKernelArgs:    options.InjectExtraKernelArgs,
+				SkipInjectingConfig: options.WithSkipInjectingConfig,
 			},
 		)
 	}
@@ -664,6 +1060,7 @@ func (suite *BaseSuite) setupCluster(options clusterOptions) {
 				Name:     fmt.Sprintf("worker-%d", i),
 				Type:     machine.TypeWorker,
 				IPs:      []netip.Addr{ips[options.ControlplaneNodes+i-1]},
+				UUID:     &suite.workerUUIDs[i-1],
 				Memory:   DefaultSettings.MemMB * 1024 * 1024,
 				NanoCPUs: DefaultSettings.CPUs * 1000 * 1000 * 1000,
 				Disks: []*provision.Disk{
@@ -671,16 +1068,19 @@ func (suite *BaseSuite) setupCluster(options clusterOptions) {
 						Size: DefaultSettings.DiskGB * 1024 * 1024 * 1024,
 					},
 				},
-				Config:           suite.configBundle.Worker(),
-				SDStubKernelArgs: options.InjectExtraKernelArgs,
+				Config:              suite.configBundle.Worker(),
+				SDStubKernelArgs:    options.InjectExtraKernelArgs,
+				SkipInjectingConfig: options.WithSkipInjectingConfig,
 			},
 		)
 	}
 
 	provisionerOptions := []provision.Option{
-		provision.WithBootlader(true),
+		provision.WithBootloader(true),
 		provision.WithUEFI(!options.WithBios),
+		provision.WithTPM2(options.WithTrustedBoot),
 		provision.WithTalosConfig(suite.configBundle.TalosConfig()),
+		provision.WithSiderolinkAgent(options.WithSideroLink),
 	}
 
 	suite.Cluster, err = suite.provisioner.Create(
@@ -707,9 +1107,15 @@ func (suite *BaseSuite) setupCluster(options clusterOptions) {
 
 	suite.clusterAccess = access.NewAdapter(suite.Cluster, provision.WithTalosConfig(suite.configBundle.TalosConfig()))
 
-	suite.Require().NoError(suite.clusterAccess.Bootstrap(suite.ctx, os.Stdout))
+	// Bootstrap and wait for health whenever the machine config has reached the
+	// nodes — either injected at boot, or applied via the API (WithApplyConfig).
+	// The maintenance suites skip both injection and WithApplyConfig because they
+	// drive apply-config + bootstrap themselves.
+	if !options.WithSkipInjectingConfig || options.WithApplyConfig {
+		suite.Require().NoError(suite.clusterAccess.Bootstrap(suite.ctx, os.Stdout))
 
-	suite.waitForClusterHealth()
+		suite.waitForClusterHealth()
+	}
 }
 
 // runE2E runs e2e test on the cluster.

@@ -12,7 +12,6 @@ import (
 
 	"github.com/cosi-project/runtime/pkg/resource"
 	"github.com/cosi-project/runtime/pkg/resource/rtestutils"
-	"github.com/siderolabs/go-pointer"
 	"github.com/siderolabs/go-procfs/procfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -204,25 +203,25 @@ func (suite *OperatorConfigSuite) TestMachineConfigurationDHCP4() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineNetwork: &v1alpha1.NetworkConfig{
+					MachineNetwork: &v1alpha1.NetworkConfig{ //nolint:staticcheck // legacy config
 						NetworkInterfaces: []*v1alpha1.Device{
 							{
 								DeviceInterface: "eth0",
 							},
 							{
 								DeviceInterface: "eth1",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 							},
 							{
-								DeviceIgnore:    pointer.To(true),
+								DeviceIgnore:    new(true),
 								DeviceInterface: "eth2",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 							},
 							{
 								DeviceInterface: "eth3",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 								DeviceDHCPOptions: &v1alpha1.DHCPOptions{
-									DHCPIPv4:        pointer.To(true),
+									DHCPIPv4:        new(true),
 									DHCPRouteMetric: 256,
 								},
 							},
@@ -231,7 +230,7 @@ func (suite *OperatorConfigSuite) TestMachineConfigurationDHCP4() {
 								DeviceVlans: []*v1alpha1.Vlan{
 									{
 										VlanID:   25,
-										VlanDHCP: pointer.To(true),
+										VlanDHCP: new(true),
 									},
 									{
 										VlanID: 26,
@@ -246,7 +245,7 @@ func (suite *OperatorConfigSuite) TestMachineConfigurationDHCP4() {
 							},
 							{
 								DeviceInterface: "eth5",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 							},
 						},
 					},
@@ -315,27 +314,27 @@ func (suite *OperatorConfigSuite) TestMachineConfigurationDHCP6() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineNetwork: &v1alpha1.NetworkConfig{
+					MachineNetwork: &v1alpha1.NetworkConfig{ //nolint:staticcheck // legacy config
 						NetworkInterfaces: []*v1alpha1.Device{
 							{
 								DeviceInterface: "eth1",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 								DeviceDHCPOptions: &v1alpha1.DHCPOptions{
-									DHCPIPv4: pointer.To(true),
+									DHCPIPv4: new(true),
 								},
 							},
 							{
 								DeviceInterface: "eth2",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 								DeviceDHCPOptions: &v1alpha1.DHCPOptions{
-									DHCPIPv6: pointer.To(true),
+									DHCPIPv6: new(true),
 								},
 							},
 							{
 								DeviceInterface: "eth3",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 								DeviceDHCPOptions: &v1alpha1.DHCPOptions{
-									DHCPIPv6:        pointer.To(true),
+									DHCPIPv6:        new(true),
 									DHCPRouteMetric: 512,
 								},
 							},
@@ -386,11 +385,12 @@ func (suite *OperatorConfigSuite) TestMachineConfigurationNewStyle() {
 
 	dhcp1 := networkcfg.NewDHCPv4ConfigV1Alpha1("eth0")
 	dhcp1.ConfigRouteMetric = 256
-	dhcp1.ConfigIgnoreHostname = pointer.To(true)
+	dhcp1.ConfigIgnoreHostname = new(true)
+	dhcp1.ConfigIgnoreRoutes = new(true)
 
 	dhcp2 := networkcfg.NewDHCPv6ConfigV1Alpha1("eth0")
 	dhcp2.ConfigRouteMetric = 512
-	dhcp2.ConfigClientIdentifier = pointer.To(nethelpers.ClientIdentifierDUID)
+	dhcp2.ConfigClientIdentifier = new(nethelpers.ClientIdentifierDUID)
 	dhcp2.ConfigDUIDRaw = nethelpers.HardwareAddr{0x00, 0x01, 0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01}
 
 	dhcp3 := networkcfg.NewDHCPv4ConfigV1Alpha1("eth23")
@@ -418,12 +418,14 @@ func (suite *OperatorConfigSuite) TestMachineConfigurationNewStyle() {
 				asrt.Equal("eth0", r.TypedSpec().LinkName)
 				asrt.EqualValues(256, r.TypedSpec().DHCP4.RouteMetric)
 				asrt.True(r.TypedSpec().DHCP4.SkipHostnameRequest)
+				asrt.True(r.TypedSpec().DHCP4.SkipRoutes)
 				asrt.Equal(nethelpers.ClientIdentifierMAC, r.TypedSpec().DHCP4.ClientIdentifier.ClientIdentifier)
 			case "configuration/dhcp4/eth23":
 				asrt.Equal(network.OperatorDHCP4, r.TypedSpec().Operator)
 				asrt.Equal("eth23", r.TypedSpec().LinkName)
 				asrt.EqualValues(network.DefaultRouteMetric, r.TypedSpec().DHCP4.RouteMetric)
 				asrt.False(r.TypedSpec().DHCP4.SkipHostnameRequest)
+				asrt.False(r.TypedSpec().DHCP4.SkipRoutes)
 				asrt.Equal(nethelpers.ClientIdentifierMAC, r.TypedSpec().DHCP4.ClientIdentifier.ClientIdentifier)
 			case "configuration/dhcp4/eth2":
 				asrt.Equal(network.OperatorDHCP4, r.TypedSpec().Operator)
@@ -497,25 +499,25 @@ func (suite *OperatorConfigSuite) TestMachineConfigurationWithAliases() {
 			&v1alpha1.Config{
 				ConfigVersion: "v1alpha1",
 				MachineConfig: &v1alpha1.MachineConfig{
-					MachineNetwork: &v1alpha1.NetworkConfig{
+					MachineNetwork: &v1alpha1.NetworkConfig{ //nolint:staticcheck // legacy config
 						NetworkInterfaces: []*v1alpha1.Device{
 							{
 								DeviceInterface: "enx0123",
 							},
 							{
 								DeviceInterface: "enx0456",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 							},
 							{
-								DeviceIgnore:    pointer.To(true),
+								DeviceIgnore:    new(true),
 								DeviceInterface: "enxa",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 							},
 							{
 								DeviceInterface: "enxb",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 								DeviceDHCPOptions: &v1alpha1.DHCPOptions{
-									DHCPIPv4:        pointer.To(true),
+									DHCPIPv4:        new(true),
 									DHCPRouteMetric: 256,
 								},
 							},
@@ -524,7 +526,7 @@ func (suite *OperatorConfigSuite) TestMachineConfigurationWithAliases() {
 								DeviceVlans: []*v1alpha1.Vlan{
 									{
 										VlanID:   25,
-										VlanDHCP: pointer.To(true),
+										VlanDHCP: new(true),
 									},
 									{
 										VlanID: 26,
@@ -539,7 +541,7 @@ func (suite *OperatorConfigSuite) TestMachineConfigurationWithAliases() {
 							},
 							{
 								DeviceInterface: "enxd",
-								DeviceDHCP:      pointer.To(true),
+								DeviceDHCP:      new(true),
 							},
 						},
 					},

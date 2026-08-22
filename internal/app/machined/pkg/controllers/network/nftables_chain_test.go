@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/siderolabs/go-pointer"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/ctest"
@@ -79,7 +78,7 @@ func (s *NfTablesChainSuite) TestAcceptLo() {
 			MatchOIfName: &network.NfTablesIfNameMatch{
 				InterfaceNames: []string{"lo"},
 			},
-			Verdict: pointer.To(nethelpers.VerdictAccept),
+			Verdict: new(nethelpers.VerdictAccept),
 		},
 	}
 
@@ -104,7 +103,7 @@ func (s *NfTablesChainSuite) TestAcceptMultipleIfnames() {
 			MatchIIfName: &network.NfTablesIfNameMatch{
 				InterfaceNames: []string{"eth0", "eth1"},
 			},
-			Verdict: pointer.To(nethelpers.VerdictAccept),
+			Verdict: new(nethelpers.VerdictAccept),
 		},
 	}
 
@@ -128,7 +127,7 @@ func (s *NfTablesChainSuite) TestPolicyDrop() {
 	chain.TypedSpec().Policy = nethelpers.VerdictDrop
 	chain.TypedSpec().Rules = []network.NfTablesRule{
 		{
-			Verdict: pointer.To(nethelpers.VerdictAccept),
+			Verdict: new(nethelpers.VerdictAccept),
 		},
 	}
 
@@ -156,7 +155,7 @@ func (s *NfTablesChainSuite) TestICMPLimit() {
 			MatchLimit: &network.NfTablesLimitMatch{
 				PacketRatePerSecond: 5,
 			},
-			Verdict: pointer.To(nethelpers.VerdictAccept),
+			Verdict: new(nethelpers.VerdictAccept),
 		},
 	}
 
@@ -184,7 +183,7 @@ func (s *NfTablesChainSuite) TestConntrackCounter() {
 					nethelpers.ConntrackStateRelated,
 				},
 			},
-			Verdict: pointer.To(nethelpers.VerdictAccept),
+			Verdict: new(nethelpers.VerdictAccept),
 		},
 		{
 			MatchConntrackState: &network.NfTablesConntrackStateMatch{
@@ -193,7 +192,7 @@ func (s *NfTablesChainSuite) TestConntrackCounter() {
 				},
 			},
 			AnonCounter: true,
-			Verdict:     pointer.To(nethelpers.VerdictDrop),
+			Verdict:     new(nethelpers.VerdictDrop),
 		},
 	}
 
@@ -235,7 +234,7 @@ func (s *NfTablesChainSuite) TestMatchMarksSubnets() {
 					netip.MustParsePrefix("192.168.0.0/24"),
 				},
 			},
-			Verdict: pointer.To(nethelpers.VerdictAccept),
+			Verdict: new(nethelpers.VerdictAccept),
 		},
 	}
 
@@ -297,7 +296,7 @@ func (s *NfTablesChainSuite) TestUpdateChains() {
 					netip.MustParsePrefix("192.168.0.0/24"),
 				},
 			},
-			Verdict: pointer.To(nethelpers.VerdictAccept),
+			Verdict: new(nethelpers.VerdictAccept),
 		},
 	}
 
@@ -409,7 +408,7 @@ func (s *NfTablesChainSuite) TestL4Match() {
 					},
 				},
 			},
-			Verdict: pointer.To(nethelpers.VerdictDrop),
+			Verdict: new(nethelpers.VerdictDrop),
 		},
 	}
 
@@ -453,7 +452,7 @@ func (s *NfTablesChainSuite) TestL4Match2() {
 					},
 				},
 			},
-			Verdict: pointer.To(nethelpers.VerdictDrop),
+			Verdict: new(nethelpers.VerdictDrop),
 		},
 	}
 
@@ -505,7 +504,7 @@ func (s *NfTablesChainSuite) TestL4MatchAdjacentPorts() {
 					},
 				},
 			},
-			Verdict: pointer.To(nethelpers.VerdictDrop),
+			Verdict: new(nethelpers.VerdictDrop),
 		},
 	}
 
@@ -544,7 +543,7 @@ func (s *NfTablesChainSuite) TestL4MatchAny() {
 					},
 				},
 			},
-			Verdict: pointer.To(nethelpers.VerdictAccept),
+			Verdict: new(nethelpers.VerdictAccept),
 		},
 	}
 
@@ -554,6 +553,50 @@ func (s *NfTablesChainSuite) TestL4MatchAny() {
 	chain test-tcp {
 		type filter hook input priority filter; policy accept;
 		meta nfproto ipv4 tcp dport { 1023 } accept
+	}
+}`)
+}
+
+func (s *NfTablesChainSuite) TestL4MatchAnyWithHole() {
+	chain := network.NewNfTablesChain(network.NamespaceName, "test-tcp")
+	chain.TypedSpec().Type = nethelpers.ChainTypeFilter
+	chain.TypedSpec().Hook = nethelpers.ChainHookInput
+	chain.TypedSpec().Priority = nethelpers.ChainPriorityFilter
+	chain.TypedSpec().Policy = nethelpers.VerdictAccept
+	chain.TypedSpec().Rules = []network.NfTablesRule{
+		{
+			MatchSourceAddress: &network.NfTablesAddressMatch{
+				IncludeSubnets: []netip.Prefix{
+					netip.MustParsePrefix("0.0.0.0/0"),
+					netip.MustParsePrefix("::/0"),
+				},
+				ExcludeSubnets: []netip.Prefix{
+					netip.MustParsePrefix("10.1.2.3/32"),
+					netip.MustParsePrefix("fe80::1/128"),
+				},
+			},
+			MatchLayer4: &network.NfTablesLayer4Match{
+				Protocol: nethelpers.ProtocolTCP,
+				MatchDestinationPort: &network.NfTablesPortMatch{
+					Ranges: []network.PortRange{
+						{
+							Lo: 1023,
+							Hi: 1023,
+						},
+					},
+				},
+			},
+			Verdict: new(nethelpers.VerdictAccept),
+		},
+	}
+
+	s.Require().NoError(s.State().Create(s.Ctx(), chain))
+
+	s.checkNftOutput(`table inet talos-test {
+	chain test-tcp {
+		type filter hook input priority filter; policy accept;
+		ip saddr { 0.0.0.0-10.1.2.2, 10.1.2.4-255.255.255.255 } tcp dport { 1023 } accept
+		ip6 saddr { ::-fe80::, fe80::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff } tcp dport { 1023 } accept
 	}
 }`)
 }
@@ -578,7 +621,7 @@ func (s *NfTablesChainSuite) TestICMPTypeMatch() {
 				},
 			},
 			AnonCounter: true,
-			Verdict:     pointer.To(nethelpers.VerdictDrop),
+			Verdict:     new(nethelpers.VerdictDrop),
 		},
 	}
 

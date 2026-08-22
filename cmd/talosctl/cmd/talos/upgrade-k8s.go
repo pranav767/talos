@@ -7,11 +7,11 @@ package talos
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/siderolabs/go-kubernetes/kubernetes/manifests"
+	"github.com/siderolabs/go-kubernetes/kubernetes/ssa"
 	"github.com/siderolabs/go-kubernetes/kubernetes/upgrade"
 	"github.com/spf13/cobra"
-	"sigs.k8s.io/cli-utils/pkg/inventory"
 
 	"github.com/siderolabs/talos/cmd/talosctl/pkg/talos/helpers"
 	"github.com/siderolabs/talos/pkg/cluster"
@@ -28,7 +28,25 @@ var upgradeK8sCmd = &cobra.Command{
 	Long:  `Command runs upgrade of Kubernetes control plane components between specified versions.`,
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return WithClient(upgradeKubernetes)
+		ctx := cmd.Context()
+
+		clientFactory, err := NewClientFactory(ctx, &upgradeK8sCmdFlags)
+		if err != nil {
+			return err
+		}
+
+		defer clientFactory.Close() //nolint:errcheck
+
+		if err := helpers.ClientVersionCheck(ctx, clientFactory); err != nil {
+			return err
+		}
+
+		ctx, c, _, err := clientFactory.BuildClientEnforceSingleNode(ctx, "upgrade-k8s")
+		if err != nil {
+			return err
+		}
+
+		return upgradeKubernetes(ctx, c)
 	},
 }
 
@@ -44,8 +62,6 @@ var upgradeK8sCmdFlags struct {
 }
 
 func init() {
-	ssaDefaults := manifests.DefaultSSApplyBehaviorOptions()
-
 	upgradeK8sCmd.Flags().StringVar(&upgradeK8sCmdFlags.FromVersion, "from", "", "the Kubernetes control plane version to upgrade from")
 	upgradeK8sCmd.Flags().StringVar(&upgradeK8sCmdFlags.ToVersion, "to", constants.DefaultKubernetesVersion, "the Kubernetes control plane version to upgrade to")
 	upgradeK8sCmd.Flags().StringVar(&upgradeOptions.ControlPlaneEndpoint, "endpoint", "", "the cluster control plane endpoint")
@@ -62,27 +78,17 @@ func init() {
 	upgradeK8sCmd.Flags().StringVar(&upgradeOptions.ProxyImage, "proxy-image", constants.KubeProxyImage, "kube-proxy image to use")
 
 	// manifest sync related options
-	upgradeK8sCmd.Flags().BoolVar(&upgradeOptions.ForceConflicts, "manifests-force-conflicts", ssaDefaults.ForceConflicts, "overwrite the fields when applying even if the field manager differs")
-	upgradeK8sCmd.Flags().BoolVar(&upgradeOptions.NoPrune, "manifests-no-prune", ssaDefaults.NoPrune, "whether pruning of previously applied objects should happen after apply")
-	upgradeK8sCmd.Flags().StringVar(&upgradeK8sCmdFlags.inventoryPolicy, "manifests-inventory-policy", ssaDefaults.InventoryPolicy.String(),
+	upgradeK8sCmd.Flags().BoolVar(&upgradeOptions.ForceManifests, "manifests-force", false, "whether to recreate objects that contain immutable field changes")
+	upgradeK8sCmd.Flags().BoolVar(&upgradeOptions.NoPrune, "manifests-no-prune", false, "whether pruning of previously applied objects should happen after apply")
+	upgradeK8sCmd.Flags().StringVar(&upgradeK8sCmdFlags.inventoryPolicy, "manifests-inventory-policy", "AdoptIfNoInventory",
 		"kubernetes SSA inventory policy (one of 'MustMatch', 'AdoptIfNoInventory' or 'AdoptAll')")
-	upgradeK8sCmd.Flags().DurationVar(&upgradeOptions.PruneTimeout, "manifests-prune-timeout", ssaDefaults.PruneTimeout,
-		"how long to wait for resources to be fully deleted (set to zero to disable waiting)")
-	upgradeK8sCmd.Flags().DurationVar(&upgradeOptions.ReconcileTimeout, "manifests-reconcile-timeout", ssaDefaults.ReconcileTimeout,
+	upgradeK8sCmd.Flags().DurationVar(&upgradeOptions.ReconcileTimeout, "manifests-reconcile-timeout", 5*time.Minute,
 		"how long to wait for resources to be fully reconciled (set to zero to disable waiting)")
 
 	addCommand(upgradeK8sCmd)
 }
 
 func upgradeKubernetes(ctx context.Context, c *client.Client) error {
-	if err := helpers.FailIfMultiNodes(ctx, "upgrade-k8s"); err != nil {
-		return err
-	}
-
-	if err := helpers.ClientVersionCheck(ctx, c); err != nil {
-		return err
-	}
-
 	clientProvider := &cluster.ConfigClientProvider{
 		DefaultClient: c,
 	}
@@ -124,7 +130,7 @@ func upgradeKubernetes(ctx context.Context, c *client.Client) error {
 		commentsFlags |= encoder.CommentsExamples
 	}
 
-	policy, err := parseInventoryPolicy(upgradeK8sCmdFlags.inventoryPolicy)
+	policy, err := ssa.ParseInventoryPolicy(upgradeK8sCmdFlags.inventoryPolicy)
 	if err != nil {
 		return err
 	}
@@ -132,18 +138,9 @@ func upgradeKubernetes(ctx context.Context, c *client.Client) error {
 	upgradeOptions.InventoryPolicy = policy
 	upgradeOptions.EncoderOpt = encoder.WithComments(commentsFlags)
 
-	return k8s.Upgrade(ctx, &state, upgradeOptions)
-}
-
-func parseInventoryPolicy(policy string) (inventory.Policy, error) {
-	switch policy {
-	case "MustMatch":
-		return inventory.PolicyMustMatch, nil
-	case "AdoptIfNoInventory":
-		return inventory.PolicyAdoptIfNoInventory, nil
-	case "AdoptAll":
-		return inventory.PolicyAdoptAll, nil
-	default:
-		return 0, fmt.Errorf("invalid inventory policy %q: must be one of 'MustMatch', 'AdoptIfNoInventory', or 'AdoptAll'", policy)
+	if upgradeOptions.ReconcileTimeout == 0 {
+		upgradeOptions.SkipManifestWait = true
 	}
+
+	return k8s.Upgrade(ctx, &state, upgradeOptions)
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/resources/block"
 	"github.com/siderolabs/talos/pkg/machinery/resources/cluster"
 	"github.com/siderolabs/talos/pkg/machinery/resources/config"
+	"github.com/siderolabs/talos/pkg/machinery/resources/containers"
 	"github.com/siderolabs/talos/pkg/machinery/resources/cri"
 	"github.com/siderolabs/talos/pkg/machinery/resources/etcd"
 	"github.com/siderolabs/talos/pkg/machinery/resources/files"
@@ -29,7 +30,9 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/resources/perf"
 	"github.com/siderolabs/talos/pkg/machinery/resources/runtime"
 	"github.com/siderolabs/talos/pkg/machinery/resources/secrets"
+	"github.com/siderolabs/talos/pkg/machinery/resources/security"
 	"github.com/siderolabs/talos/pkg/machinery/resources/siderolink"
+	"github.com/siderolabs/talos/pkg/machinery/resources/storage"
 	"github.com/siderolabs/talos/pkg/machinery/resources/time"
 	"github.com/siderolabs/talos/pkg/machinery/resources/v1alpha1"
 )
@@ -86,8 +89,11 @@ func NewState() (*State, error) {
 		{network.NamespaceName, "Networking resources."},
 		{network.ConfigNamespaceName, "Networking configuration resources."},
 		{cri.NamespaceName, "CRI Seccomp resources."},
+		{containers.NamespaceName, "Talos-managed container resources."},
 		{secrets.NamespaceName, "Resources with secret material."},
+		{security.NamespaceName, "Security resources."},
 		{perf.NamespaceName, "Stats resources."},
+		{storage.NamespaceName, "Storage resources."},
 	} {
 		if err := s.namespaceRegistry.Register(ctx, ns.name, ns.description); err != nil {
 			return nil, err
@@ -112,7 +118,11 @@ func NewState() (*State, error) {
 		&block.VolumeMountRequest{},
 		&block.VolumeMountStatus{},
 		&block.VolumeStatus{},
+		&block.VolumeTrimSchedule{},
 		&block.ZswapStatus{},
+		&containers.ContainerSpec{},
+		&block.FSScrubSchedule{},
+		&block.FSScrubStatus{},
 		&cluster.Affiliate{},
 		&cluster.Config{},
 		&cluster.Identity{},
@@ -128,6 +138,7 @@ func NewState() (*State, error) {
 		&etcd.Member{},
 		&files.EtcFileSpec{},
 		&files.EtcFileStatus{},
+		&hardware.CPUCore{},
 		&hardware.MemoryModule{},
 		&hardware.PCIDevice{},
 		&hardware.PCIDriverRebindConfig{},
@@ -137,16 +148,20 @@ func NewState() (*State, error) {
 		&hardware.SystemInformation{},
 		&k8s.AdmissionControlConfig{},
 		&k8s.AuditPolicyConfig{},
+		&k8s.AuthenticationConfig{},
 		&k8s.AuthorizationConfig{},
 		&k8s.APIServerConfig{},
 		&k8s.KubePrismEndpoints{},
 		&k8s.ConfigStatus{},
 		&k8s.ControllerManagerConfig{},
 		&k8s.Endpoint{},
+		&k8s.EtcdEncryptionConfig{},
 		&k8s.ExtraManifestsConfig{},
 		&k8s.KubeletConfig{},
+		&k8s.KubeletKubeconfig{},
 		&k8s.KubeletLifecycle{},
 		&k8s.KubeletSpec{},
+		&k8s.KubeletStatus{},
 		&k8s.KubePrismConfig{},
 		&k8s.KubePrismStatuses{},
 		&k8s.Manifest{},
@@ -173,6 +188,8 @@ func NewState() (*State, error) {
 		&kubespan.PeerStatus{},
 		&network.AddressStatus{},
 		&network.AddressSpec{},
+		&network.BGPInstanceConfig{},
+		&network.BGPPeerStatus{},
 		&network.DeviceConfigSpec{},
 		&network.DNSResolveCache{},
 		&network.DNSUpstream{},
@@ -198,13 +215,20 @@ func NewState() (*State, error) {
 		&network.ResolverSpec{},
 		&network.RouteStatus{},
 		&network.RouteSpec{},
+		&network.RoutingRuleSpec{},
+		&network.RoutingRuleStatus{},
+		&network.StaticHost{},
 		&network.Status{},
 		&network.TimeServerStatus{},
 		&network.TimeServerSpec{},
 		&perf.CPU{},
 		&perf.Memory{},
+		&cri.BaseRuntimeSpecConfig{},
+		&cri.CustomizationConfig{},
 		&cri.RegistriesConfig{},
+		&runtime.APIServiceConfig{},
 		&runtime.BootedEntry{},
+		&runtime.BootID{},
 		&runtime.DevicesStatus{},
 		&runtime.Diagnostic{},
 		&runtime.Environment{},
@@ -212,16 +236,19 @@ func NewState() (*State, error) {
 		&runtime.ExtensionServiceConfig{},
 		&runtime.ExtensionServiceConfigStatus{},
 		&runtime.ExtensionStatus{},
+		&runtime.ImageFactorySchematic{},
 		&runtime.KernelCmdline{},
+		&runtime.KernelModuleStatus{},
 		&runtime.KernelModuleSpec{},
 		&runtime.KernelParamSpec{},
 		&runtime.KernelParamDefaultSpec{},
 		&runtime.KernelParamStatus{},
 		&runtime.KmsgLogConfig{},
-		&runtime.LoadedKernelModule{},
+		&runtime.LoadedKernelModule{}, //nolint:staticcheck
 		&runtime.MaintenanceServiceConfig{},
 		&runtime.MaintenanceServiceRequest{},
 		&runtime.MachineResetSignal{},
+		&runtime.RebootRequest{},
 		&runtime.MachineStatus{},
 		&runtime.MetaKey{},
 		&runtime.MetaLoaded{},
@@ -230,7 +257,9 @@ func NewState() (*State, error) {
 		&runtime.PlatformMetadata{},
 		&runtime.SBOMItem{},
 		&runtime.SecurityState{},
+		&runtime.ServicePID{},
 		&runtime.UniqueMachineToken{},
+		&runtime.UnattendedInstallStatus{},
 		&runtime.Version{},
 		&runtime.WatchdogTimerConfig{},
 		&runtime.WatchdogTimerStatus{},
@@ -243,13 +272,25 @@ func NewState() (*State, error) {
 		&secrets.Kubernetes{},
 		&secrets.KubernetesDynamicCerts{},
 		&secrets.KubernetesRoot{},
-		&secrets.MaintenanceServiceCerts{},
 		&secrets.MaintenanceRoot{},
 		&secrets.OSRoot{},
 		&secrets.Trustd{},
+		&security.ImageVerificationRule{},
+		&security.TUFTrustedRoot{},
 		&siderolink.Config{},
 		&siderolink.Status{},
 		&siderolink.Tunnel{},
+		&storage.LVMRefreshRequest{},
+		&storage.LVMPhysicalVolumeSpec{},
+		&storage.LVMLogicalVolumeSpec{},
+		&storage.LVMLogicalVolumeStatus{},
+		&storage.LVMPhysicalVolumeStatus{},
+		&storage.LVMValidationError{},
+		&storage.LVMVolumeGroupSpec{},
+		&storage.LVMVolumeGroupStatus{},
+		&storage.MDArraySpec{},
+		&storage.MDArrayStatus{},
+		&storage.MDRefreshRequest{},
 		&time.AdjtimeStatus{},
 		&time.Status{},
 		&v1alpha1.AcquireConfigSpec{},

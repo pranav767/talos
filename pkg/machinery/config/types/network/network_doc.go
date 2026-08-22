@@ -8,10 +8,285 @@ package network
 
 import (
 	"net/netip"
+	"time"
 
 	"github.com/siderolabs/talos/pkg/machinery/config/encoder"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/meta"
 	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
 )
+
+func (BGPInstanceConfigV1Alpha1) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "BGPInstanceConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "BGPInstanceConfig configures a native BGP routing instance on the host." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "BGPInstanceConfig configures a native BGP routing instance on the host.",
+		Fields: []encoder.Doc{
+			{
+				Type:   "Meta",
+				Inline: true,
+			},
+			{
+				Name:        "name",
+				Type:        "string",
+				Note:        "",
+				Description: "Name of the BGP routing instance.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Name of the BGP routing instance." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "vrf",
+				Type:        "string",
+				Note:        "",
+				Description: "Linux VRF link used by this routing instance. If unset, the default routing domain is used.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Linux VRF link used by this routing instance. If unset, the default routing domain is used." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "localASN",
+				Type:        "uint32",
+				Note:        "",
+				Description: "Local autonomous system number for the BGP instance.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Local autonomous system number for the BGP instance." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "routerID",
+				Type:        "Addr",
+				Note:        "",
+				Description: "BGP router-id. If not set, it is derived from the first advertised address.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "BGP router-id. If not set, it is derived from the first advertised address." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "routeSource",
+				Type:        "Addr",
+				Note:        "",
+				Description: "Preferred source address set on routes installed from BGP (the kernel route `src` / RTA_PREFSRC,\nequivalent to FRR's `ip protocol bgp route-map SETSRC`). If not set, the kernel selects the source address.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Preferred source address set on routes installed from BGP (the kernel route `src` / RTA_PREFSRC," /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "advertise",
+				Type:        "[]string",
+				Note:        "",
+				Description: "Names or aliases of the links whose addresses are originated into BGP as connected networks using their configured prefix lengths.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Names or aliases of the links whose addresses are originated into BGP as connected networks using their configured prefix lengths." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "multipath",
+				Type:        "bool",
+				Note:        "",
+				Description: "Enable ECMP (multipath) for routes learned from multiple neighbors. Defaults to false.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Enable ECMP (multipath) for routes learned from multiple neighbors. Defaults to false." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "maxPaths",
+				Type:        "uint8",
+				Note:        "",
+				Description: "Maximum number of ECMP next-hops to install. Zero uses the implementation default.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Maximum number of ECMP next-hops to install. Zero uses the implementation default." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "installRoutes",
+				Type:        "bool",
+				Note:        "",
+				Description: "Install routes learned from BGP neighbors into the Linux routing table. Defaults to true.\nWhen false, learned routes remain in this instance's BGP RIB and can still be selected by\n`importRoutes`, but Talos does not install them into the Linux FIB.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Install routes learned from BGP neighbors into the Linux routing table. Defaults to true." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "importRoutes",
+				Type:        "[]BGPImportRoute",
+				Note:        "",
+				Description: "Selected routes to import from other BGP instances. Imports are one-way: matching best paths\nlearned from each source instance are preserved and advertised by this instance with its own\nnext hop. Locally originated and previously imported paths are not recursively imported.\nSelectors in a single target instance must not overlap, giving each imported prefix one source.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Selected routes to import from other BGP instances. Imports are one-way: matching best paths" /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "neighbors",
+				Type:        "[]BGPNeighborConfig",
+				Note:        "",
+				Description: "BGP neighbors in this routing instance.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "BGP neighbors in this routing instance." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	doc.AddExample("", exampleBGPInstanceConfigV1Alpha1())
+
+	doc.Fields[1].AddExample("", "fabric")
+	doc.Fields[3].AddExample("", uint32(65001))
+	doc.Fields[4].AddExample("", meta.Addr{Addr: netip.MustParseAddr("10.0.0.1")})
+	doc.Fields[5].AddExample("", meta.Addr{Addr: netip.MustParseAddr("10.0.0.1")})
+	doc.Fields[6].AddExample("", []string{"dummy0"})
+
+	return doc
+}
+
+func (BGPImportRoute) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "BGPImportRoute",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "BGPImportRoute selects routes learned by another BGP instance for one-way import." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "BGPImportRoute selects routes learned by another BGP instance for one-way import.",
+		AppearsIn: []encoder.Appearance{
+			{
+				TypeName:  "BGPInstanceConfigV1Alpha1",
+				FieldName: "importRoutes",
+			},
+		},
+		Fields: []encoder.Doc{
+			{
+				Name:        "bgpInstance",
+				Type:        "string",
+				Note:        "",
+				Description: "Name of the source BGP instance.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Name of the source BGP instance." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "prefixes",
+				Type:        "[]Prefix",
+				Note:        "",
+				Description: "CIDR selectors. A learned route matches when it is contained by one of these prefixes.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "CIDR selectors. A learned route matches when it is contained by one of these prefixes." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	return doc
+}
+
+func (BGPNeighborConfig) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "BGPNeighborConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "BGPNeighborConfig configures a concrete BGP neighbor." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "BGPNeighborConfig configures a concrete BGP neighbor.",
+		AppearsIn: []encoder.Appearance{
+			{
+				TypeName:  "BGPInstanceConfigV1Alpha1",
+				FieldName: "neighbors",
+			},
+		},
+		Fields: []encoder.Doc{
+			{
+				Name:        "address",
+				Type:        "Addr",
+				Note:        "",
+				Description: "Neighbor IP address for a numbered session. Mutually exclusive with `link`.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Neighbor IP address for a numbered session. Mutually exclusive with `link`." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "link",
+				Type:        "string",
+				Note:        "",
+				Description: "Link name or alias for an unnumbered (IPv6 link-local) session. Mutually exclusive with `address`.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Link name or alias for an unnumbered (IPv6 link-local) session. Mutually exclusive with `address`." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "peerASN",
+				Type:        "uint32",
+				Note:        "",
+				Description: "Expected peer ASN. Zero accepts any ASN advertised by the peer (eBGP \"external\").",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Expected peer ASN. Zero accepts any ASN advertised by the peer (eBGP \"external\")." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "localASN",
+				Type:        "uint32",
+				Note:        "",
+				Description: "Local ASN override for this neighbor. Zero uses the instance local ASN.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Local ASN override for this neighbor. Zero uses the instance local ASN." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "passive",
+				Type:        "bool",
+				Note:        "",
+				Description: "Wait for the neighbor to establish the connection instead of initiating it.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Wait for the neighbor to establish the connection instead of initiating it." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "holdTime",
+				Type:        "Duration",
+				Note:        "",
+				Description: "BGP hold time for this neighbor. Zero uses the implementation default.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "BGP hold time for this neighbor. Zero uses the implementation default." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "bfd",
+				Type:        "BGPBFDConfig",
+				Note:        "",
+				Description: "BFD (Bidirectional Forwarding Detection) settings for this neighbor.\nThe presence of this block enables BFD; an empty block uses the implementation defaults.\nBFD is supported only when the BGP instance uses the default routing domain, not a VRF.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "BFD (Bidirectional Forwarding Detection) settings for this neighbor." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	return doc
+}
+
+func (BGPBFDConfig) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "BGPBFDConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "BGPBFDConfig configures BFD for a BGP neighbor." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "BGPBFDConfig configures BFD for a BGP neighbor.",
+		AppearsIn: []encoder.Appearance{
+			{
+				TypeName:  "BGPNeighborConfig",
+				FieldName: "bfd",
+			},
+		},
+		Fields: []encoder.Doc{
+			{
+				Name:        "transmitInterval",
+				Type:        "Duration",
+				Note:        "",
+				Description: "Desired minimum transmit interval. Zero uses the implementation default.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Desired minimum transmit interval. Zero uses the implementation default." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "receiveInterval",
+				Type:        "Duration",
+				Note:        "",
+				Description: "Required minimum receive interval. Zero uses the implementation default.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Required minimum receive interval. Zero uses the implementation default." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "detectMultiplier",
+				Type:        "uint8",
+				Note:        "",
+				Description: "BFD detection multiplier. Zero uses the implementation default.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "BFD detection multiplier. Zero uses the implementation default." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	return doc
+}
+
+func (BlackholeRouteConfigV1Alpha1) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "BlackholeRouteConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "BlackholeRouteConfig is a config document to configure blackhole routes." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "BlackholeRouteConfig is a config document to configure blackhole routes.",
+		Fields: []encoder.Doc{
+			{
+				Type:   "Meta",
+				Inline: true,
+			},
+			{
+				Name:        "name",
+				Type:        "string",
+				Note:        "",
+				Description: "Route destination as an address prefix.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Route destination as an address prefix." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "metric",
+				Type:        "uint32",
+				Note:        "",
+				Description: "The optional metric for the route.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "The optional metric for the route." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	doc.AddExample("", exampleBlackholeRouteConfigV1Alpha1())
+
+	doc.Fields[1].AddExample("", "10.0.0.0/12")
+
+	return doc
+}
 
 func (BondConfigV1Alpha1) Doc() *encoder.Doc {
 	doc := &encoder.Doc{
@@ -203,8 +478,8 @@ func (BondConfigV1Alpha1) Doc() *encoder.Doc {
 				Name:        "adLACPActive",
 				Type:        "ADLACPActive",
 				Note:        "",
-				Description: "Whether to send LACPDU frames periodically.",
-				Comments:    [3]string{"" /* encoder.HeadComment */, "Whether to send LACPDU frames periodically." /* encoder.LineComment */, "" /* encoder.FootComment */},
+				Description: "Whether to send LACPDU frames periodically, defaults to \"on\" if mode is 802.3ad.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Whether to send LACPDU frames periodically, defaults to \"on\" if mode is 802.3ad." /* encoder.LineComment */, "" /* encoder.FootComment */},
 				Values: []string{
 					"on",
 					"off",
@@ -435,6 +710,61 @@ func (BridgeVLANConfig) Doc() *encoder.Doc {
 	return doc
 }
 
+func (VRFConfigV1Alpha1) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "VRFConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "VRFConfig is a config document to create a vrf and assign links to it." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "VRFConfig is a config document to create a vrf and assign links to it.",
+		Fields: []encoder.Doc{
+			{
+				Type:   "Meta",
+				Inline: true,
+			},
+			{
+				Name:        "name",
+				Type:        "string",
+				Note:        "",
+				Description: "Name of the vrf link (interface) to be created.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Name of the vrf link (interface) to be created." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "hardwareAddr",
+				Type:        "HardwareAddr",
+				Note:        "",
+				Description: "Override the hardware (MAC) address of the link.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Override the hardware (MAC) address of the link." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "links",
+				Type:        "[]string",
+				Note:        "",
+				Description: "Names of the links (interfaces) to be assigned to this vrf.\nLink aliases can be used here as well.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Names of the links (interfaces) to be assigned to this vrf." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "table",
+				Type:        "RoutingTable",
+				Note:        "",
+				Description: "Routing table number to use for this vrf.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Routing table number to use for this vrf." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Type:   "CommonLinkConfig",
+				Inline: true,
+			},
+		},
+	}
+
+	doc.AddExample("", exampleVRFConfigV1Alpha1())
+
+	doc.Fields[1].AddExample("", "vrf-blue")
+	doc.Fields[2].AddExample("", nethelpers.HardwareAddr{0x2e, 0x3c, 0x4d, 0x5e, 0x6f, 0x70})
+	doc.Fields[3].AddExample("", []string{"enp1s3", "enp1s2"})
+	doc.Fields[4].AddExample("", 10)
+
+	return doc
+}
+
 func (DefaultActionConfigV1Alpha1) Doc() *encoder.Doc {
 	doc := &encoder.Doc{
 		Type:        "NetworkDefaultActionConfig",
@@ -496,6 +826,13 @@ func (DHCPv4ConfigV1Alpha1) Doc() *encoder.Doc {
 				Comments:    [3]string{"" /* encoder.HeadComment */, "Ignore hostname received from the DHCP server." /* encoder.LineComment */, "" /* encoder.FootComment */},
 			},
 			{
+				Name:        "ignoreRoutes",
+				Type:        "bool",
+				Note:        "",
+				Description: "Ignore routes received from the DHCP server (the default gateway and classless static routes).\n\nThe connected route for the leased address is still configured.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Ignore routes received from the DHCP server (the default gateway and classless static routes)." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
 				Name:        "clientIdentifier",
 				Type:        "ClientIdentifier",
 				Note:        "",
@@ -520,7 +857,7 @@ func (DHCPv4ConfigV1Alpha1) Doc() *encoder.Doc {
 	doc.AddExample("", exampleDHCPv4ConfigV1Alpha1())
 
 	doc.Fields[1].AddExample("", "enp0s2")
-	doc.Fields[5].AddExample("", "00:01:00:01:23:45:67:89:ab:cd:ef:01:23:45")
+	doc.Fields[6].AddExample("", "00:01:00:01:23:45:67:89:ab:cd:ef:01:23:45")
 
 	return doc
 }
@@ -907,6 +1244,148 @@ func (HostnameConfigV1Alpha1) Doc() *encoder.Doc {
 	return doc
 }
 
+func (HTTPProbeConfigV1Alpha1) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "HTTPProbeConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "HTTPProbeConfig is a config document to configure network HTTP connectivity probes." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "HTTPProbeConfig is a config document to configure network HTTP connectivity probes.",
+		Fields: []encoder.Doc{
+			{
+				Type:   "Meta",
+				Inline: true,
+			},
+			{
+				Name:        "name",
+				Type:        "string",
+				Note:        "",
+				Description: "Name of the probe.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Name of the probe." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Type:   "CommonProbeConfig",
+				Inline: true,
+			},
+			{
+				Name:        "url",
+				Type:        "URL",
+				Note:        "",
+				Description: "HTTP or HTTPS URL to probe. The probe succeeds if the server responds with a 2xx or 3xx status code.\nProbe does not follow redirects.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "HTTP or HTTPS URL to probe. The probe succeeds if the server responds with a 2xx or 3xx status code." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "timeout",
+				Type:        "Duration",
+				Note:        "",
+				Description: "Timeout for the probe.\nDefaults to 10s.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Timeout for the probe." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	doc.AddExample("", exampleHTTPProbeConfigV1Alpha1())
+
+	doc.Fields[1].AddExample("", "http-check")
+	doc.Fields[3].AddExample("", "https://example.com")
+	doc.Fields[4].AddExample("", 10*time.Second)
+
+	return doc
+}
+
+func (KubeSpanConfigV1Alpha1) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "KubeSpanConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "KubeSpanConfig is a config document to configure KubeSpan." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "KubeSpanConfig is a config document to configure KubeSpan.",
+		Fields: []encoder.Doc{
+			{
+				Type:   "Meta",
+				Inline: true,
+			},
+			{
+				Name:        "enabled",
+				Type:        "bool",
+				Note:        "",
+				Description: "Enable the KubeSpan feature.\nRequires cluster discovery to be enabled through a DiscoveryServiceConfig document.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Enable the KubeSpan feature." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "advertiseKubernetesNetworks",
+				Type:        "bool",
+				Note:        "",
+				Description: "Control whether Kubernetes pod CIDRs are announced over KubeSpan from the node.\nIf disabled, CNI handles pod-to-pod traffic encapsulation.\nIf enabled, KubeSpan takes over pod-to-pod traffic directly.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Control whether Kubernetes pod CIDRs are announced over KubeSpan from the node." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "allowDownPeerBypass",
+				Type:        "bool",
+				Note:        "",
+				Description: "Skip sending traffic via KubeSpan if the peer connection state is not up.\nThis provides configurable choice between connectivity and security.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Skip sending traffic via KubeSpan if the peer connection state is not up." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "harvestExtraEndpoints",
+				Type:        "bool",
+				Note:        "",
+				Description: "KubeSpan can collect and publish extra endpoints for each member of the cluster\nbased on Wireguard endpoint information for each peer.\nDisabled by default. Do not enable with high peer counts (>50).",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "KubeSpan can collect and publish extra endpoints for each member of the cluster" /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "mtu",
+				Type:        "uint32",
+				Note:        "",
+				Description: "KubeSpan link MTU size.\nDefault value is 1420.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "KubeSpan link MTU size." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "filters",
+				Type:        "KubeSpanFiltersConfig",
+				Note:        "",
+				Description: "KubeSpan advanced filtering of network addresses.\nSettings are optional and apply only to this node.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "KubeSpan advanced filtering of network addresses." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	doc.AddExample("", exampleKubeSpanV1Alpha1())
+
+	return doc
+}
+
+func (KubeSpanFiltersConfig) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "KubeSpanFiltersConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "KubeSpanFiltersConfig configures KubeSpan endpoint filters." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "KubeSpanFiltersConfig configures KubeSpan endpoint filters.",
+		AppearsIn: []encoder.Appearance{
+			{
+				TypeName:  "KubeSpanConfigV1Alpha1",
+				FieldName: "filters",
+			},
+		},
+		Fields: []encoder.Doc{
+			{
+				Name:        "endpoints",
+				Type:        "[]string",
+				Note:        "",
+				Description: "Filter node addresses which will be advertised as KubeSpan endpoints for peer-to-peer Wireguard connections.\n\nBy default, all addresses are advertised, and KubeSpan cycles through all endpoints until it finds one that works.\n\nDefault value: no filtering.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Filter node addresses which will be advertised as KubeSpan endpoints for peer-to-peer Wireguard connections." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "excludeAdvertisedNetworks",
+				Type:        "[]Prefix",
+				Note:        "",
+				Description: "Filter networks (e.g., host addresses, pod CIDRs if enabled) which will be advertised over KubeSpan.\n\nBy default, all networks are advertised.\nUse this filter to exclude some networks from being advertised.\n\nNote: excluded networks will not be reachable over KubeSpan, so make sure\nthese networks are still reachable via some other route (e.g., direct connection).\n\nDefault value: no filtering.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Filter networks (e.g., host addresses, pod CIDRs if enabled) which will be advertised over KubeSpan." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	doc.Fields[0].AddExample("Exclude addresses in 192.168.0.0/16 subnet.", []string{"0.0.0.0/0", "!192.168.0.0/16", "::/0"})
+	doc.Fields[1].AddExample("Exclude private networks from being advertised.", []meta.Prefix{{netip.MustParsePrefix("192.168.1.0/24")}})
+
+	return doc
+}
+
 func (KubespanEndpointsConfigV1Alpha1) Doc() *encoder.Doc {
 	doc := &encoder.Doc{
 		Type:        "KubeSpanEndpointsConfig",
@@ -1014,11 +1493,23 @@ func (CommonLinkConfig) Doc() *encoder.Doc {
 				FieldName: "",
 			},
 			{
+				TypeName:  "VRFConfigV1Alpha1",
+				FieldName: "",
+			},
+			{
 				TypeName:  "DummyLinkConfigV1Alpha1",
 				FieldName: "",
 			},
 			{
 				TypeName:  "LinkConfigV1Alpha1",
+				FieldName: "",
+			},
+			{
+				TypeName:  "VethConfigV1Alpha1",
+				FieldName: "",
+			},
+			{
+				TypeName:  "VethPeerConfig",
 				FieldName: "",
 			},
 			{
@@ -1164,8 +1655,8 @@ func (RouteConfig) Doc() *encoder.Doc {
 		},
 	}
 
-	doc.Fields[0].AddExample("", Prefix{netip.MustParsePrefix("10.0.0.0/8")})
-	doc.Fields[1].AddExample("", Addr{netip.MustParseAddr("10.0.0.1")})
+	doc.Fields[0].AddExample("", meta.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+	doc.Fields[1].AddExample("", meta.Addr{netip.MustParseAddr("10.0.0.1")})
 
 	return doc
 }
@@ -1184,14 +1675,14 @@ func (LinkAliasConfigV1Alpha1) Doc() *encoder.Doc {
 				Name:        "name",
 				Type:        "string",
 				Note:        "",
-				Description: "Alias for the link.\n\nDon't use system interface names like \"eth0\", \"ens3\", \"enp0s2\", etc. as those may conflict\nwith existing physical interfaces.",
+				Description: "Alias for the link.\n\nDon't use system interface names like \"eth0\", \"ens3\", \"enp0s2\", etc. as those may conflict\nwith existing physical interfaces.\n\nThe name can contain a single integer format verb (`%d`) to create multiple aliases\nfrom a single config document. When a format verb is detected, each matched link receives a sequential\nalias (e.g. `net0`, `net1`, ...) based on hardware address order of the links.\nLinks already aliased by a previous config are automatically skipped.",
 				Comments:    [3]string{"" /* encoder.HeadComment */, "Alias for the link." /* encoder.LineComment */, "" /* encoder.FootComment */},
 			},
 			{
 				Name:        "selector",
 				Type:        "LinkSelector",
 				Note:        "",
-				Description: "Selector to match the link to alias.\n\nSelector must match exactly one link, otherwise an error is returned.\nIf multiple selectors match the same link, the first one is used.",
+				Description: "Selector to match the link to alias.\n\nWhen the alias name is a fixed string, the selector must match exactly one link.\nWhen the alias name contains a format verb (e.g. `net%d`), the selector may match multiple links\nand each match receives a sequential alias.\nIf multiple selectors match the same link, the first one is used.",
 				Comments:    [3]string{"" /* encoder.HeadComment */, "Selector to match the link to alias." /* encoder.LineComment */, "" /* encoder.FootComment */},
 			},
 		},
@@ -1199,8 +1690,11 @@ func (LinkAliasConfigV1Alpha1) Doc() *encoder.Doc {
 
 	doc.AddExample("", exampleLinkAliasConfigV1Alpha1())
 
+	doc.AddExample("", exampleLinkAliasMultipleConfigV1Alpha1())
+
 	doc.Fields[1].AddExample("", "net0")
 	doc.Fields[1].AddExample("", "private")
+	doc.Fields[1].AddExample("", "net%d")
 
 	return doc
 }
@@ -1258,12 +1752,25 @@ func (ResolverConfigV1Alpha1) Doc() *encoder.Doc {
 				Description: "Configuration for search domains (in /etc/resolv.conf).\n\nThe default is to derive search domains from the hostname FQDN.",
 				Comments:    [3]string{"" /* encoder.HeadComment */, "Configuration for search domains (in /etc/resolv.conf)." /* encoder.LineComment */, "" /* encoder.FootComment */},
 			},
+			{
+				Name:        "hostDNS",
+				Type:        "HostDNSConfig",
+				Note:        "",
+				Description: "Configuration for host DNS resolver.\n\nThis configures a local DNS caching resolver on the host to improve DNS resolution performance and reliability.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Configuration for host DNS resolver." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
 		},
 	}
 
 	doc.AddExample("", exampleResolverConfigV1Alpha1())
 
 	doc.AddExample("", exampleResolverConfigV1Alpha2())
+
+	doc.AddExample("", exampleResolverConfigV1Alpha3())
+
+	doc.AddExample("", exampleResolverConfigV1Alpha4())
+
+	doc.AddExample("", exampleResolverConfigV1Alpha5())
 
 	return doc
 }
@@ -1287,10 +1794,30 @@ func (NameserverConfig) Doc() *encoder.Doc {
 				Description: "The IP address of the nameserver.",
 				Comments:    [3]string{"" /* encoder.HeadComment */, "The IP address of the nameserver." /* encoder.LineComment */, "" /* encoder.FootComment */},
 			},
+			{
+				Name:        "protocol",
+				Type:        "DNSProtocol",
+				Note:        "",
+				Description: "A DNS protocol to use.\n\nThe default protocol is plain DNS (`Do53`) (DNS over TCP/UDP). Set this to\n`DoT` to use DNS over TLS (RFC 7858) on TCP port 853, or `DoH` to use DNS\nover HTTPS (RFC 8484) on TCP port 443 with the `/dns-query` URL path. Both\n`DoT` and `DoH` deliver encrypted queries to this nameserver.\n\nNote: encrypted DNS protocols require a correct system clock to validate\ncertificates. If NTP is configured with hostnames that need to be resolved\nthrough DoT/DoH, the boot may stall: NTP needs DNS, and TLS needs valid\ntime. Either rely on the hardware clock, configure NTP servers by IP, or\nkeep at least one plain-DNS fallback nameserver.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "A DNS protocol to use." /* encoder.LineComment */, "" /* encoder.FootComment */},
+				Values: []string{
+					"Do53",
+					"DoT",
+					"DoH",
+				},
+			},
+			{
+				Name:        "tlsServerName",
+				Type:        "string",
+				Note:        "",
+				Description: "TLS server name to validate the nameserver certificate against.\n\nThis field should be set if the protocol is set to `DoT` or `DoH`.\nThe value is used both as the SNI sent during the TLS handshake and as the\nname verified against the server certificate. For `DoH`, it is also used as\nthe host portion of the request URL (`https://<tlsServerName>/dns-query`)\nwhile the connection itself is established to the configured `address`.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "TLS server name to validate the nameserver certificate against." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
 		},
 	}
 
-	doc.Fields[0].AddExample("", Addr{netip.MustParseAddr("10.0.0.1")})
+	doc.Fields[0].AddExample("", meta.Addr{netip.MustParseAddr("10.0.0.1")})
+	doc.Fields[2].AddExample("", "dns1.example.com")
 
 	return doc
 }
@@ -1311,7 +1838,7 @@ func (SearchDomainsConfig) Doc() *encoder.Doc {
 				Name:        "domains",
 				Type:        "[]string",
 				Note:        "",
-				Description: "A list of search domains to be used for DNS resolution.\n\nSearch domains are appended to unqualified domain names during DNS resolution.\nFor example, if \"example.com\" is a search domain and a user tries to resolve\n\"host\", the system will attempt to resolve \"host.example.com\".\n\nThis overrides any search domains obtained via DHCP or platform configuration.\nThe default configuration derives the search domain from the hostname FQDN.",
+				Description: "A list of search domains to be used for DNS resolution.\n\nSearch domains are appended to unqualified domain names during DNS resolution.\nFor example, if \"example.com\" is a search domain and a user tries to resolve\n\"host\", the system will attempt to resolve \"host.example.com\".\n\nIf set, this overrides any search domains obtained via DHCP or platform configuration.\nAn empty list (`domains: []`) clears search domains obtained from DHCP or platform,\nwhile leaving this field unset inherits them.\nThe default configuration derives the search domain from the hostname FQDN.",
 				Comments:    [3]string{"" /* encoder.HeadComment */, "A list of search domains to be used for DNS resolution." /* encoder.LineComment */, "" /* encoder.FootComment */},
 			},
 			{
@@ -1323,6 +1850,141 @@ func (SearchDomainsConfig) Doc() *encoder.Doc {
 			},
 		},
 	}
+
+	return doc
+}
+
+func (HostDNSConfig) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "HostDNSConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "HostDNSConfig represents host DNS configuration." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "HostDNSConfig represents host DNS configuration.",
+		AppearsIn: []encoder.Appearance{
+			{
+				TypeName:  "ResolverConfigV1Alpha1",
+				FieldName: "hostDNS",
+			},
+		},
+		Fields: []encoder.Doc{
+			{
+				Name:        "enabled",
+				Type:        "bool",
+				Note:        "",
+				Description: "Enable host DNS caching resolver.\n\nWhen enabled, a local DNS caching resolver is deployed on the host to improve DNS resolution performance and reliability.\nUpstream DNS servers for the host resolver are configured using the `nameservers` field in this config document.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Enable host DNS caching resolver." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "forwardKubeDNSToHost",
+				Type:        "bool",
+				Note:        "",
+				Description: "Use the host DNS resolver as upstream for Kubernetes CoreDNS pods.\n\nWhen enabled, CoreDNS pods use host DNS server as the upstream DNS (instead of\nusing configured upstream DNS resolvers directly).",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Use the host DNS resolver as upstream for Kubernetes CoreDNS pods." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "resolveMemberNames",
+				Type:        "bool",
+				Note:        "",
+				Description: "Resolve member hostnames using the host DNS resolver.\n\nWhen enabled, cluster member hostnames and node names are resolved using the host DNS resolver.\nThis requires service discovery to be enabled.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Resolve member hostnames using the host DNS resolver." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	return doc
+}
+
+func (RoutingRuleConfigV1Alpha1) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "RoutingRuleConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "RoutingRuleConfig is a config document to configure Linux policy routing rules." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "RoutingRuleConfig is a config document to configure Linux policy routing rules.",
+		Fields: []encoder.Doc{
+			{
+				Type:   "Meta",
+				Inline: true,
+			},
+			{
+				Name:        "name",
+				Type:        "string",
+				Note:        "",
+				Description: "Priority of the routing rule.\nLower values are matched first.\nMust be between 1 and 32765 (excluding reserved priorities [0 32500 32501 32766 32767]).\nMust be unique across all routing rules in the configuration.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Priority of the routing rule." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "src",
+				Type:        "Prefix",
+				Note:        "",
+				Description: "Source address prefix to match.\nIf empty, matches all sources.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Source address prefix to match." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "dst",
+				Type:        "Prefix",
+				Note:        "",
+				Description: "Destination address prefix to match.\nIf empty, matches all destinations.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Destination address prefix to match." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "table",
+				Type:        "RoutingTable",
+				Note:        "",
+				Description: "The routing table to look up if the rule matches.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "The routing table to look up if the rule matches." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "action",
+				Type:        "RoutingRuleAction",
+				Note:        "",
+				Description: "The action to perform when the rule matches.\nDefaults to \"unicast\" (table lookup).",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "The action to perform when the rule matches." /* encoder.LineComment */, "" /* encoder.FootComment */},
+				Values: []string{
+					"unicast",
+					"blackhole",
+					"unreachable",
+					"prohibit",
+				},
+			},
+			{
+				Name:        "iifName",
+				Type:        "string",
+				Note:        "",
+				Description: "Match packets arriving on this interface.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Match packets arriving on this interface." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "oifName",
+				Type:        "string",
+				Note:        "",
+				Description: "Match packets going out on this interface.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Match packets going out on this interface." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "fwMark",
+				Type:        "uint32",
+				Note:        "",
+				Description: "Match packets with this firewall mark value.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Match packets with this firewall mark value." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "fwMask",
+				Type:        "uint32",
+				Note:        "",
+				Description: "Mask for the firewall mark comparison.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Mask for the firewall mark comparison." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	doc.AddExample("", exampleRoutingRuleConfigV1Alpha1())
+
+	doc.Fields[1].AddExample("", 1000)
+	doc.Fields[2].AddExample("", "10.0.0.0/8")
+	doc.Fields[3].AddExample("", "192.168.0.0/16")
+	doc.Fields[4].AddExample("", 100)
+	doc.Fields[6].AddExample("", "eth0")
+	doc.Fields[7].AddExample("", "eth1")
+	doc.Fields[8].AddExample("", uint32(0x100))
+	doc.Fields[9].AddExample("", uint32(0xff00))
 
 	return doc
 }
@@ -1475,6 +2137,92 @@ func (StaticHostConfigV1Alpha1) Doc() *encoder.Doc {
 	return doc
 }
 
+func (TCPProbeConfigV1Alpha1) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "TCPProbeConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "TCPProbeConfig is a config document to configure network TCP connectivity probes." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "TCPProbeConfig is a config document to configure network TCP connectivity probes.",
+		Fields: []encoder.Doc{
+			{
+				Type:   "Meta",
+				Inline: true,
+			},
+			{
+				Name:        "name",
+				Type:        "string",
+				Note:        "",
+				Description: "Name of the probe.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Name of the probe." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Type:   "CommonProbeConfig",
+				Inline: true,
+			},
+			{
+				Name:        "endpoint",
+				Type:        "string",
+				Note:        "",
+				Description: "Endpoint to probe in the format host:port.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Endpoint to probe in the format host:port." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "timeout",
+				Type:        "Duration",
+				Note:        "",
+				Description: "Timeout for the probe.\nDefaults to 10s.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Timeout for the probe." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	doc.AddExample("", exampleTCPProbeConfigV1Alpha1())
+
+	doc.Fields[1].AddExample("", "proxy-check")
+	doc.Fields[3].AddExample("", "proxy.example.com:3128")
+	doc.Fields[4].AddExample("", 10*time.Second)
+
+	return doc
+}
+
+func (CommonProbeConfig) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "CommonProbeConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "CommonProbeConfig holds fields common to all probe types." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "CommonProbeConfig holds fields common to all probe types.",
+		AppearsIn: []encoder.Appearance{
+			{
+				TypeName:  "HTTPProbeConfigV1Alpha1",
+				FieldName: "",
+			},
+			{
+				TypeName:  "TCPProbeConfigV1Alpha1",
+				FieldName: "",
+			},
+		},
+		Fields: []encoder.Doc{
+			{
+				Name:        "interval",
+				Type:        "Duration",
+				Note:        "",
+				Description: "Interval between probe attempts.\nDefaults to 1s.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Interval between probe attempts." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "failureThreshold",
+				Type:        "int",
+				Note:        "",
+				Description: "Number of consecutive failures for the probe to be considered failed after having succeeded.\nDefaults to 0 (immediately fail on first failure).",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Number of consecutive failures for the probe to be considered failed after having succeeded." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+		},
+	}
+
+	doc.Fields[0].AddExample("", time.Second)
+	doc.Fields[1].AddExample("", 3)
+
+	return doc
+}
+
 func (TimeSyncConfigV1Alpha1) Doc() *encoder.Doc {
 	doc := &encoder.Doc{
 		Type:        "TimeSyncConfig",
@@ -1539,8 +2287,15 @@ func (NTPConfig) Doc() *encoder.Doc {
 				Name:        "servers",
 				Type:        "[]string",
 				Note:        "",
-				Description: "Specifies time (NTP) servers to use for setting the system time.\nDefaults to `time.cloudflare.com`.",
+				Description: "Specifies time (NTP) servers to use for setting the system time.\nDefaults to `time.cloudflare.com` when configuration is not provided.",
 				Comments:    [3]string{"" /* encoder.HeadComment */, "Specifies time (NTP) servers to use for setting the system time." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "useNTS",
+				Type:        "bool",
+				Note:        "",
+				Description: "Enables NTS (Network Time Security) for NTP queries.\nNTS provides authenticated and encrypted time synchronization using TLS.\nWhen enabled, all NTP capable servers must be specified as hostnames (not IP addresses).\nDefaults to `true` when configuration is not provided, using the system default server (`time.cloudflare.com`).",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Enables NTS (Network Time Security) for NTP queries." /* encoder.LineComment */, "" /* encoder.FootComment */},
 			},
 		},
 	}
@@ -1569,6 +2324,75 @@ func (PTPConfig) Doc() *encoder.Doc {
 			},
 		},
 	}
+
+	return doc
+}
+
+func (VethConfigV1Alpha1) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "VethConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "VethConfig is a config document to create a virtual Ethernet device pair." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "VethConfig is a config document to create a virtual Ethernet device pair.",
+		Fields: []encoder.Doc{
+			{
+				Type:   "Meta",
+				Inline: true,
+			},
+			{
+				Name:        "name",
+				Type:        "string",
+				Note:        "",
+				Description: "Name of this end of the veth pair.\n\nThis is a literal kernel interface name. Link aliases are not supported here because\nthe interface is created by this document rather than selected from existing physical links.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Name of this end of the veth pair." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Name:        "peer",
+				Type:        "VethPeerConfig",
+				Note:        "",
+				Description: "Configuration for the peer end of the veth pair.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Configuration for the peer end of the veth pair." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Type:   "CommonLinkConfig",
+				Inline: true,
+			},
+		},
+	}
+
+	doc.AddExample("", exampleVethConfigV1Alpha1())
+
+	doc.Fields[1].AddExample("", "veth0")
+
+	return doc
+}
+
+func (VethPeerConfig) Doc() *encoder.Doc {
+	doc := &encoder.Doc{
+		Type:        "VethPeerConfig",
+		Comments:    [3]string{"" /* encoder.HeadComment */, "VethPeerConfig is the configuration for the peer end of a veth pair." /* encoder.LineComment */, "" /* encoder.FootComment */},
+		Description: "VethPeerConfig is the configuration for the peer end of a veth pair.",
+		AppearsIn: []encoder.Appearance{
+			{
+				TypeName:  "VethConfigV1Alpha1",
+				FieldName: "peer",
+			},
+		},
+		Fields: []encoder.Doc{
+			{
+				Name:        "name",
+				Type:        "string",
+				Note:        "",
+				Description: "Name of the peer end of the veth pair.\n\nThis is a literal kernel interface name. Link aliases are not supported here because\nthe interface is created by this document rather than selected from existing physical links.\n\nBoth endpoints are created in the host network namespace. This name can be listed in a\nVRFConfig document's `links` field to attach the peer endpoint to that VRF.",
+				Comments:    [3]string{"" /* encoder.HeadComment */, "Name of the peer end of the veth pair." /* encoder.LineComment */, "" /* encoder.FootComment */},
+			},
+			{
+				Type:   "CommonLinkConfig",
+				Inline: true,
+			},
+		},
+	}
+
+	doc.Fields[0].AddExample("", "veth-router")
 
 	return doc
 }
@@ -1750,10 +2574,16 @@ func GetFileDoc() *encoder.FileDoc {
 		Name:        "network",
 		Description: "Package network provides network machine configuration documents.\n",
 		Structs: []*encoder.Doc{
+			BGPInstanceConfigV1Alpha1{}.Doc(),
+			BGPImportRoute{}.Doc(),
+			BGPNeighborConfig{}.Doc(),
+			BGPBFDConfig{}.Doc(),
+			BlackholeRouteConfigV1Alpha1{}.Doc(),
 			BondConfigV1Alpha1{}.Doc(),
 			BridgeConfigV1Alpha1{}.Doc(),
 			BridgeSTPConfig{}.Doc(),
 			BridgeVLANConfig{}.Doc(),
+			VRFConfigV1Alpha1{}.Doc(),
 			DefaultActionConfigV1Alpha1{}.Doc(),
 			DHCPv4ConfigV1Alpha1{}.Doc(),
 			DHCPv6ConfigV1Alpha1{}.Doc(),
@@ -1763,6 +2593,9 @@ func GetFileDoc() *encoder.FileDoc {
 			EthernetChannelsConfig{}.Doc(),
 			HCloudVIPConfigV1Alpha1{}.Doc(),
 			HostnameConfigV1Alpha1{}.Doc(),
+			HTTPProbeConfigV1Alpha1{}.Doc(),
+			KubeSpanConfigV1Alpha1{}.Doc(),
+			KubeSpanFiltersConfig{}.Doc(),
 			KubespanEndpointsConfigV1Alpha1{}.Doc(),
 			Layer2VIPConfigV1Alpha1{}.Doc(),
 			LinkConfigV1Alpha1{}.Doc(),
@@ -1774,13 +2607,19 @@ func GetFileDoc() *encoder.FileDoc {
 			ResolverConfigV1Alpha1{}.Doc(),
 			NameserverConfig{}.Doc(),
 			SearchDomainsConfig{}.Doc(),
+			HostDNSConfig{}.Doc(),
+			RoutingRuleConfigV1Alpha1{}.Doc(),
 			RuleConfigV1Alpha1{}.Doc(),
 			RulePortSelector{}.Doc(),
 			IngressRule{}.Doc(),
 			StaticHostConfigV1Alpha1{}.Doc(),
+			TCPProbeConfigV1Alpha1{}.Doc(),
+			CommonProbeConfig{}.Doc(),
 			TimeSyncConfigV1Alpha1{}.Doc(),
 			NTPConfig{}.Doc(),
 			PTPConfig{}.Doc(),
+			VethConfigV1Alpha1{}.Doc(),
+			VethPeerConfig{}.Doc(),
 			VLANConfigV1Alpha1{}.Doc(),
 			WireguardConfigV1Alpha1{}.Doc(),
 			WireguardPeer{}.Doc(),

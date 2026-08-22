@@ -24,17 +24,27 @@ type Router struct {
 	remoteBackendFactory RemoteBackendFactory
 	localAddressProvider LocalAddressProvider
 	streamedMatchers     []*regexp.Regexp
+	logger               func(format string, args ...any)
+	skipRouting          bool
 }
 
 // RemoteBackendFactory provides backend generation by address (target).
 type RemoteBackendFactory func(target string) (proxy.Backend, error)
 
 // NewRouter builds new Router.
-func NewRouter(backendFactory RemoteBackendFactory, localBackend proxy.Backend, localAddressProvider LocalAddressProvider) *Router {
+func NewRouter(
+	backendFactory RemoteBackendFactory,
+	localBackend proxy.Backend,
+	localAddressProvider LocalAddressProvider,
+	skipRouting bool,
+	logger func(format string, args ...any),
+) *Router {
 	return &Router{
 		localBackend:         localBackend,
 		remoteBackendFactory: backendFactory,
 		localAddressProvider: localAddressProvider,
+		skipRouting:          skipRouting,
+		logger:               logger,
 	}
 }
 
@@ -46,8 +56,12 @@ func (r *Router) Register(srv *grpc.Server) {
 
 // Director implements proxy.StreamDirector function.
 //
-//nolint:gocyclo
+//nolint:gocyclo,cyclop
 func (r *Router) Director(ctx context.Context, fullMethodName string) (proxy.Mode, []proxy.Backend, error) {
+	if r.skipRouting {
+		return proxy.One2One, []proxy.Backend{r.localBackend}, nil
+	}
+
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return proxy.One2One, []proxy.Backend{r.localBackend}, nil
@@ -62,6 +76,10 @@ func (r *Router) Director(ctx context.Context, fullMethodName string) (proxy.Mod
 
 	if okNode && len(node) != 1 {
 		return proxy.One2One, nil, status.Error(codes.InvalidArgument, "node metadata must be single-valued")
+	}
+
+	if okNodes {
+		r.logger("request for method %s using deprecated nodes proxying: %v", fullMethodName, nodes)
 	}
 
 	// special handling for cases when a single node is requested, but forwarding is disabled
@@ -79,9 +97,15 @@ func (r *Router) Director(ctx context.Context, fullMethodName string) (proxy.Mod
 
 	switch {
 	case okNodes:
-		// COSI methods do not support one-2-many proxying.
-		if strings.HasPrefix(fullMethodName, "/cosi.") {
-			return proxy.One2One, nil, status.Error(codes.InvalidArgument, "one-2-many proxying is not supported for COSI methods")
+		// Explicit list of gRPC methods that support one-2-many proxying.
+		switch {
+		case strings.HasPrefix(fullMethodName, "/machine.MachineService/"):
+		case strings.HasPrefix(fullMethodName, "/cluster.ClusterService/"):
+		case strings.HasPrefix(fullMethodName, "/inspect.InspectService/"):
+		case strings.HasPrefix(fullMethodName, "/storage.StorageService/"):
+		case strings.HasPrefix(fullMethodName, "/time.TimeService/"):
+		default:
+			return proxy.One2One, nil, status.Errorf(codes.InvalidArgument, "one-2-many proxying is not supported for method %s", fullMethodName)
 		}
 
 		return r.aggregateDirector(nodes)

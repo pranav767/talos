@@ -36,6 +36,7 @@ links:
       mtu: 1500
       kind: bond
       type: ether
+      hardwareAddr: 4c:d9:8f:b3:34:f7
       bondMaster:
         mode: 802.3ad
         xmitHashPolicy: layer2+3
@@ -43,7 +44,7 @@ links:
         arpValidate: none
         arpAllTargets: any
         primaryReselect: always
-        failOverMac: 0
+        failOverMac: none
         miimon: 100
         updelay: 200
         downdelay: 200
@@ -54,7 +55,7 @@ links:
         tlbLogicalLb: 1
         useCarrier: true
         adActorSysPrio: 65535
-        adLacpActive: "on"
+        adLacpActive: 'on'
       layer: platform
     - name: eth0
       logical: false
@@ -93,6 +94,17 @@ links:
       type: netrom
       masterName: bond0
       slaveIndex: 1
+      layer: platform
+    - name: bond0.100
+      logical: true
+      up: true
+      mtu: 1400
+      kind: vlan
+      type: ether
+      parentName: bond0
+      vlan:
+        vlanID: 100
+        vlanProtocol: 802.1q
       layer: platform
 routes:
     - family: inet6
@@ -175,6 +187,13 @@ resolvers:
     - dnsServers:
         - 8.8.8.8
         - 1.1.1.1
+      nameServers:
+        - addr: 8.8.8.8
+          protocol: Do53
+          tlsServerName: ""
+        - addr: 1.1.1.1
+          protocol: Do53
+          tlsServerName: ""
       layer: platform
 timeServers: []
 operators:
@@ -190,6 +209,13 @@ operators:
       requireUp: true
       dhcp6:
         routeMetric: 2048
+        skipHostnameRequest: true
+      layer: platform
+    - operator: dhcp4
+      linkName: bond0.100
+      requireUp: true
+      dhcp4:
+        routeMetric: 1024
         skipHostnameRequest: true
       layer: platform
 externalIPs:

@@ -20,6 +20,7 @@ import (
 	"github.com/siderolabs/talos/internal/integration/base"
 	"github.com/siderolabs/talos/internal/integration/cli"
 	"github.com/siderolabs/talos/internal/integration/k8s"
+	"github.com/siderolabs/talos/internal/integration/misc"
 	provision_test "github.com/siderolabs/talos/internal/integration/provision"
 	"github.com/siderolabs/talos/pkg/images"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -47,6 +48,8 @@ var (
 	virtiofsd           bool
 	race                bool
 	skipEphemeralPolicy bool
+	ephemeralNode       bool
+	ephemeralWorkers    bool
 
 	dedicatedSystemVolumes bool
 
@@ -149,6 +152,8 @@ func TestIntegration(t *testing.T) {
 				Race:                   race,
 				SkipEphemeralPolicy:    skipEphemeralPolicy,
 				DedicatedSystemVolumes: dedicatedSystemVolumes,
+				EphemeralNode:          ephemeralNode,
+				EphemeralWorkers:       ephemeralWorkers,
 			})
 		}
 
@@ -218,6 +223,10 @@ func init() {
 	flag.BoolVar(&virtiofsd, "talos.virtiofsd", false, "Marker to skip tests that should not be run without virtiofsd")
 	flag.BoolVar(&skipEphemeralPolicy, "talos.skip-ephemeral-policy", false,
 		"Skip MountsSuite assertions for EPHEMERAL-backed fixture mounts")
+	flag.BoolVar(&ephemeralNode, "talos.ephemeral-node", false,
+		"All nodes run in fully ephemeral mode: STATE and EPHEMERAL are tmpfs and node state is wiped on every reboot")
+	flag.BoolVar(&ephemeralWorkers, "talos.ephemeral-workers", false,
+		"Worker nodes run in fully ephemeral mode: STATE and EPHEMERAL are tmpfs on workers and wiped on every reboot")
 	flag.BoolVar(&dedicatedSystemVolumes, "talos.dedicated-system-volumes", false,
 		"Set when the cluster was deployed with the hack/test/patches/dedicated-system-volumes-{controlplane,worker}.yaml config patches, "+
 			"i.e. the promotable system volumes are placed on dedicated partitions instead of directories under EPHEMERAL")
@@ -234,5 +243,5 @@ func init() {
 		provision_test.DefaultSettings.TargetInstallImageRegistry, "image registry for target installer image (provision tests only)")
 	flag.StringVar(&provision_test.DefaultSettings.CNIBundleURL, "talos.provision.cni-bundle-url", provision_test.DefaultSettings.CNIBundleURL, "URL to download CNI bundle from")
 
-	allSuites = slices.Concat(api.GetAllSuites(), cli.GetAllSuites(), k8s.GetAllSuites(), provision_test.GetAllSuites())
+	allSuites = slices.Concat(api.GetAllSuites(), cli.GetAllSuites(), k8s.GetAllSuites(), misc.GetAllSuites(), provision_test.GetAllSuites())
 }

@@ -5,11 +5,14 @@
 package block_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/siderolabs/go-pointer"
+	"github.com/cosi-project/runtime/pkg/state"
+	"github.com/cosi-project/runtime/pkg/state/impl/inmem"
+	"github.com/cosi-project/runtime/pkg/state/impl/namespaced"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -61,6 +64,33 @@ func TestVolumeConfigMarshalUnmarshal(t *testing.T) {
 
 				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("2.5TiB")
 				c.ProvisioningSpec.ProvisioningMinSize = block.MustByteSize("10GiB")
+
+				return c
+			},
+		},
+		{
+			name:     "negative max size",
+			filename: "volumeconfig_negativemaxsize.yaml",
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.EphemeralPartitionLabel
+
+				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("-10GiB")
+				c.ProvisioningSpec.ProvisioningMinSize = block.MustByteSize("10GiB")
+
+				return c
+			},
+		},
+		{
+			name:     "xfs min allocation group size",
+			filename: "volumeconfig_xfs.yaml",
+			cfg: func(*testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.EphemeralPartitionLabel
+
+				c.FilesystemSpec.XFSSpec = &block.XFSSpec{
+					MinAllocationGroupSizeConfig: block.MustByteSize("128GiB"),
+				}
 
 				return c
 			},
@@ -140,7 +170,23 @@ func TestVolumeConfigValidate(t *testing.T) {
 				return c
 			},
 
-			expectedErrors: "only [\"STATE\" \"EPHEMERAL\" \"IMAGECACHE\"] volumes are supported",
+			expectedErrors: "only [\"STATE\" \"EPHEMERAL\" \"IMAGECACHE\" \"ETCD\" \"CRI\" \"KUBELET\" \"LOG\"] volumes are supported",
+		},
+		{
+			name: "filesystem config for image cache",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.ImageCachePartitionLabel
+
+				c.FilesystemSpec.XFSSpec = &block.XFSSpec{
+					MinAllocationGroupSizeConfig: block.MustByteSize("128GiB"),
+				}
+
+				return c
+			},
+
+			expectedErrors: "filesystem config is not allowed for the \"IMAGECACHE\" volume",
 		},
 		{
 			name: "invalid disk selector",
@@ -170,6 +216,21 @@ func TestVolumeConfigValidate(t *testing.T) {
 			},
 
 			expectedErrors: "min size is greater than max size",
+		},
+		{
+			name: "min size negative",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.EphemeralPartitionLabel
+
+				c.ProvisioningSpec.ProvisioningMinSize = block.MustByteSize("-10GiB")
+				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("10GiB")
+
+				return c
+			},
+
+			expectedErrors: "min size cannot be negative",
 		},
 		{
 			name: "state provisioning config",
@@ -207,7 +268,7 @@ func TestVolumeConfigValidate(t *testing.T) {
 							KeyStatic: &block.EncryptionKeyStatic{
 								KeyData: "topsecret2",
 							},
-							KeyLockToSTATE: pointer.To(true),
+							KeyLockToSTATE: new(true),
 						},
 					},
 				}
@@ -242,6 +303,150 @@ func TestVolumeConfigValidate(t *testing.T) {
 			},
 
 			expectedErrors: "TPM PCR 24 is out of range (0-23)\nTPM PCR 25 is out of range (0-23)",
+		},
+		{
+			name: "mount spec for STATE volume",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.StatePartitionLabel
+
+				c.MountSpec = block.MountSpec{
+					MountDisableAccessTime: new(true),
+				}
+
+				return c
+			},
+
+			expectedErrors: "mount config is not allowed for the \"STATE\" volume",
+		},
+		{
+			name: "mount spec for IMAGECACHE volume",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.ImageCachePartitionLabel
+
+				c.MountSpec = block.MountSpec{
+					MountSecure: new(true),
+				}
+
+				return c
+			},
+
+			expectedErrors: "mount config is not allowed for the \"IMAGECACHE\" volume",
+		},
+		{
+			name: "mount spec for ETCD volume without provisioning",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.EtcdDataVolumeID
+
+				c.MountSpec = block.MountSpec{
+					MountDisableAccessTime: new(true),
+				}
+
+				return c
+			},
+
+			expectedErrors: "mount config for the \"ETCD\" volume is only supported when it is provisioned onto a dedicated partition",
+		},
+		{
+			name: "mount spec for CRI volume without provisioning",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.CRIContainerdVolumeID
+
+				c.MountSpec = block.MountSpec{
+					MountDisableAccessTime: new(true),
+				}
+
+				return c
+			},
+
+			expectedErrors: "mount config for the \"CRI\" volume is only supported when it is provisioned onto a dedicated partition",
+		},
+		{
+			name: "mount spec for KUBELET volume without provisioning",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.KubeletDataVolumeID
+
+				c.MountSpec = block.MountSpec{
+					MountDisableAccessTime: new(true),
+				}
+
+				return c
+			},
+
+			expectedErrors: "mount config for the \"KUBELET\" volume is only supported when it is provisioned onto a dedicated partition",
+		},
+		{
+			name: "LOG promotion with secure mount is allowed",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.LogVolumeID
+
+				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("50GiB")
+				c.MountSpec = block.MountSpec{
+					MountSecure: new(true),
+				}
+
+				return c
+			},
+		},
+		{
+			name: "ETCD promotion provisioning is allowed",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.EtcdDataVolumeID
+
+				require.NoError(t, c.ProvisioningSpec.DiskSelectorSpec.Match.UnmarshalText([]byte(`disk.transport == "nvme" && !system_disk`)))
+				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("50GiB")
+
+				return c
+			},
+		},
+		{
+			name: "ETCD promotion encryption is allowed",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.EtcdDataVolumeID
+
+				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("50GiB")
+				c.EncryptionSpec.EncryptionProvider = blockres.EncryptionProviderLUKS2
+				c.EncryptionSpec.EncryptionKeys = []block.EncryptionKey{
+					{
+						KeySlot: 0,
+						KeyStatic: &block.EncryptionKeyStatic{
+							KeyData: "topsecret",
+						},
+					},
+				}
+
+				return c
+			},
+		},
+		{
+			name: "ETCD promotion trim is allowed",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.EtcdDataVolumeID
+
+				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("50GiB")
+				c.TrimSpec = &block.TrimConfig{
+					TrimEnabled: new(true),
+				}
+
+				return c
+			},
 		},
 		{
 			name: "memory disallows disk selector",
@@ -332,6 +537,42 @@ func TestVolumeConfigValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "state memory valid",
+
+			cfg: func(*testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.StatePartitionLabel
+
+				vt := blockres.VolumeTypeMemory
+				c.VolumeType = &vt
+
+				return c
+			},
+		},
+		{
+			name: "state memory rejects encryption",
+
+			cfg: func(*testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.StatePartitionLabel
+
+				vt := blockres.VolumeTypeMemory
+				c.VolumeType = &vt
+
+				c.EncryptionSpec.EncryptionProvider = blockres.EncryptionProviderLUKS2
+				c.EncryptionSpec.EncryptionKeys = []block.EncryptionKey{{
+					KeySlot: 0,
+					KeyStatic: &block.EncryptionKeyStatic{
+						KeyData: "topsecret",
+					},
+				}}
+
+				return c
+			},
+
+			expectedErrors: "encryption config is not allowed for volumeType \"memory\"",
+		},
+		{
 			name: "valid",
 
 			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
@@ -340,6 +581,34 @@ func TestVolumeConfigValidate(t *testing.T) {
 
 				require.NoError(t, c.ProvisioningSpec.DiskSelectorSpec.Match.UnmarshalText([]byte(`disk.size > 120u * GiB`)))
 				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("2.5TiB")
+				c.ProvisioningSpec.ProvisioningMinSize = block.MustByteSize("10GiB")
+
+				return c
+			},
+		},
+		{
+			name: "valid negative",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.EphemeralPartitionLabel
+
+				require.NoError(t, c.ProvisioningSpec.DiskSelectorSpec.Match.UnmarshalText([]byte(`disk.size > 120u * GiB`)))
+				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("-2GiB")
+				c.ProvisioningSpec.ProvisioningMinSize = block.MustByteSize("10GiB")
+
+				return c
+			},
+		},
+		{
+			name: "valid percentage",
+
+			cfg: func(t *testing.T) *block.VolumeConfigV1Alpha1 {
+				c := block.NewVolumeConfigV1Alpha1()
+				c.MetaName = constants.EphemeralPartitionLabel
+
+				require.NoError(t, c.ProvisioningSpec.DiskSelectorSpec.Match.UnmarshalText([]byte(`disk.size > 120u * GiB`)))
+				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("90%")
 				c.ProvisioningSpec.ProvisioningMinSize = block.MustByteSize("10GiB")
 
 				return c
@@ -359,6 +628,114 @@ func TestVolumeConfigValidate(t *testing.T) {
 				require.Error(t, err)
 
 				assert.EqualError(t, err, test.expectedErrors)
+			}
+		})
+	}
+}
+
+func TestVolumeConfigRuntimeValidate(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+
+		volumeID     string
+		provisioning bool
+
+		// current volume to seed into the state (skipped if seedStatus is false).
+		seedStatus   bool
+		currentType  blockres.VolumeType
+		currentPhase blockres.VolumePhase
+
+		expectedError string
+	}{
+		{
+			name:         "promote running directory volume is rejected",
+			volumeID:     constants.EtcdDataVolumeID,
+			provisioning: true,
+			seedStatus:   true,
+			currentType:  blockres.VolumeTypeDirectory,
+			currentPhase: blockres.VolumePhaseReady,
+
+			expectedError: `the backing of the "ETCD" system volume cannot be changed after creation (current: directory, requested: partition); ` +
+				`migrating an existing system volume to or from a dedicated partition is not supported`,
+		},
+		{
+			name:         "demote running partition volume is rejected",
+			volumeID:     constants.KubeletDataVolumeID,
+			provisioning: false,
+			seedStatus:   true,
+			currentType:  blockres.VolumeTypePartition,
+			currentPhase: blockres.VolumePhaseReady,
+
+			expectedError: `the backing of the "KUBELET" system volume cannot be changed after creation (current: partition, requested: directory); ` +
+				`migrating an existing system volume to or from a dedicated partition is not supported`,
+		},
+		{
+			name:         "matching partition is allowed",
+			volumeID:     constants.EtcdDataVolumeID,
+			provisioning: true,
+			seedStatus:   true,
+			currentType:  blockres.VolumeTypePartition,
+			currentPhase: blockres.VolumePhaseReady,
+		},
+		{
+			name:         "matching directory is allowed",
+			volumeID:     constants.CRIContainerdVolumeID,
+			provisioning: false,
+			seedStatus:   true,
+			currentType:  blockres.VolumeTypeDirectory,
+			currentPhase: blockres.VolumePhaseReady,
+		},
+		{
+			name:         "no established volume is allowed (cluster creation)",
+			volumeID:     constants.EtcdDataVolumeID,
+			provisioning: true,
+			seedStatus:   false,
+		},
+		{
+			name:         "unsettled volume is allowed",
+			volumeID:     constants.EtcdDataVolumeID,
+			provisioning: true,
+			seedStatus:   true,
+			currentType:  blockres.VolumeTypeDirectory,
+			currentPhase: blockres.VolumePhaseWaiting,
+		},
+		{
+			name:         "non-promotable volume is ignored",
+			volumeID:     constants.EphemeralPartitionLabel,
+			provisioning: true,
+			seedStatus:   true,
+			currentType:  blockres.VolumeTypeDirectory,
+			currentPhase: blockres.VolumePhaseReady,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			st := state.WrapCore(namespaced.NewState(inmem.Build))
+
+			if test.seedStatus {
+				vs := blockres.NewVolumeStatus(blockres.NamespaceName, test.volumeID)
+				vs.TypedSpec().Type = test.currentType
+				vs.TypedSpec().Phase = test.currentPhase
+				require.NoError(t, st.Create(ctx, vs))
+			}
+
+			c := block.NewVolumeConfigV1Alpha1()
+			c.MetaName = test.volumeID
+
+			if test.provisioning {
+				c.ProvisioningSpec.ProvisioningMaxSize = block.MustSize("50GiB")
+			}
+
+			_, err := c.RuntimeValidate(ctx, st, validationMode{})
+
+			if test.expectedError == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, test.expectedError)
 			}
 		})
 	}

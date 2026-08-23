@@ -8,10 +8,10 @@ import (
 	"testing"
 
 	"github.com/siderolabs/gen/optional"
-	blockpb "github.com/siderolabs/talos/pkg/machinery/api/resource/definitions/block"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/siderolabs/talos/internal/app/machined/pkg/controllers/block/internal/volumes"
+	blockpb "github.com/siderolabs/talos/pkg/machinery/api/resource/definitions/block"
 	"github.com/siderolabs/talos/pkg/machinery/resources/block"
 )
 
@@ -47,6 +47,18 @@ func TestCompareVolumeConfigs(t *testing.T) {
 		expected int
 	}{
 		{
+			name: "no provisioning instructions",
+
+			a: &block.VolumeConfigSpec{},
+			b: &block.VolumeConfigSpec{
+				Provisioning: block.ProvisioningSpec{
+					Wave: block.WaveSystemDisk,
+				},
+			},
+
+			expected: -1,
+		},
+		{
 			name: "different wave",
 
 			a: &block.VolumeConfigSpec{
@@ -57,6 +69,9 @@ func TestCompareVolumeConfigs(t *testing.T) {
 			b: &block.VolumeConfigSpec{
 				Provisioning: block.ProvisioningSpec{
 					Wave: block.WaveUserVolumes,
+					FilesystemSpec: block.FilesystemSpec{
+						Type: block.FilesystemTypeEXT4,
+					},
 				},
 			},
 
@@ -130,6 +145,31 @@ func TestCompareVolumeConfigs(t *testing.T) {
 						Grow:    false,
 						MinSize: 50,
 						MaxSize: 0, // no limit
+					},
+				},
+			},
+
+			expected: -1,
+		},
+		{
+			// resA is "A" and resB is "B", so equivalent specs are ordered by volume ID
+			name: "equivalent specs are ordered by ID",
+
+			a: &block.VolumeConfigSpec{
+				Provisioning: block.ProvisioningSpec{
+					Wave: block.WaveSystemDisk,
+					PartitionSpec: block.PartitionSpec{
+						MinSize: 100,
+						MaxSize: 200,
+					},
+				},
+			},
+			b: &block.VolumeConfigSpec{
+				Provisioning: block.ProvisioningSpec{
+					Wave: block.WaveSystemDisk,
+					PartitionSpec: block.PartitionSpec{
+						MinSize: 100,
+						MaxSize: 200,
 					},
 				},
 			},
